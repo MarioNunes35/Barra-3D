@@ -4,6 +4,8 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.colors import sample_colorscale
+import base64
+import io
 
 st.set_page_config(page_title="3D Bar com Desvio-Padrão", layout="wide")
 st.title("3D Bar com Desvio-Padrão")
@@ -29,7 +31,11 @@ camera_preset = st.sidebar.selectbox(
     "Ângulo da câmera", ["Padrão", "Topo", "Frente", "Isométrico"], index=0
 )
 
-png_scale = st.sidebar.slider("Escala PNG (alta resolução)", 1, 6, 3, 1)
+# Opções de exportação
+st.sidebar.subheader("Exportação")
+export_width = st.sidebar.slider("Largura da imagem (px)", 800, 3000, 1200, 100)
+export_height = st.sidebar.slider("Altura da imagem (px)", 600, 2000, 800, 100)
+export_scale = st.sidebar.slider("Escala de qualidade", 1, 6, 2, 1)
 
 # ===================== Dados =====================
 st.subheader("Dados")
@@ -83,7 +89,7 @@ if np.isclose(vmin, vmax):
 # ===================== Helpers =====================
 def color_for_value(val, scale_name, vmin, vmax):
     t = (float(val) - vmin) / (vmax - vmin) if vmax > vmin else 0.5
-    return sample_colorscale(scale_name, [min(max(t, 0.0), 1.0)])[0]  # "rgb(...)" ou "rgba(...)"
+    return sample_colorscale(scale_name, [min(max(t, 0.0), 1.0)])[0]
 
 def bar_mesh3d(xc, yc, h, w, color_hex, hovertext=None):
     """Paralelepípedo centrado em (xc, yc) com altura h e largura w."""
@@ -208,6 +214,8 @@ fig.update_layout(
     ),
     margin=dict(l=0, r=0, b=0, t=30),
     title="3D Bar com Desvio-Padrão",
+    width=export_width,
+    height=export_height,
 )
 
 # Câmera
@@ -221,52 +229,153 @@ else:  # Isométrico
     cam = dict(eye=dict(x=1.4, y=1.4, z=1.4))
 fig.update_layout(scene_camera=cam)
 
-# ===================== Render + export client-side =====================
+# ===================== Render =====================
 st.plotly_chart(
     fig,
     use_container_width=True,
     config={
         "displayModeBar": True,
         "toImageButtonOptions": {
-            "format": "png",          # "png" | "svg" | "jpeg" | "webp"
+            "format": "png",
             "filename": "grafico_3d",
-            "scale": png_scale        # ↑ aumenta resolução
+            "scale": export_scale,
+            "width": export_width,
+            "height": export_height,
         }
     },
 )
 
-# ===================== Export server-side (opcional) =====================
-st.subheader("Exportar (opcional no servidor)")
-col1, col2 = st.columns(2)
+# ===================== Exportação Melhorada =====================
+st.subheader("Exportar Gráfico")
+
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    # Tentativa de garantir Chrome em runtime (quando possível)
-    try:
-        if not shutil.which("google-chrome") and not os.getenv("PLOTLY_CHROME"):
-            subprocess.run([sys.executable, "-m", "plotly_get_chrome"], check=True)
-    except Exception:
-        pass
-
-    try:
-        png_bytes = fig.to_image(format="png", scale=png_scale)  # requer Kaleido + Chrome
-        st.download_button("⬇️ Baixar PNG (servidor)", data=png_bytes,
-                           file_name="grafico_3d.png", mime="image/png")
-    except Exception as e:
-        st.warning(
-            "Exportação via servidor indisponível. Use o **ícone de câmera** no gráfico "
-            "(client-side) para baixar em alta. "
-            f"Detalhe técnico: {e}"
-        )
+    # HTML interativo sempre funciona
+    html_content = fig.to_html(
+        include_plotlyjs="cdn", 
+        full_html=True,
+        config={
+            "displayModeBar": True,
+            "toImageButtonOptions": {
+                "format": "png",
+                "filename": "grafico_3d",
+                "scale": export_scale,
+                "width": export_width,
+                "height": export_height,
+            }
+        }
+    )
+    st.download_button(
+        "📄 Baixar HTML Interativo", 
+        data=html_content,
+        file_name="grafico_3d.html", 
+        mime="text/html"
+    )
 
 with col2:
-    html = fig.to_html(include_plotlyjs="cdn", full_html=False)
-    st.download_button("⬇️ Baixar HTML interativo", data=html,
-                       file_name="grafico_3d.html", mime="text/html")
+    # Método alternativo para PNG usando plotly.io
+    try:
+        import plotly.io as pio
+        
+        # Tenta usar kaleido primeiro, depois outros engines
+        png_bytes = None
+        engines = ['kaleido', 'orca']
+        
+        for engine in engines:
+            try:
+                pio.kaleido.scope.default_format = "png"
+                png_bytes = fig.to_image(
+                    format="png", 
+                    width=export_width, 
+                    height=export_height, 
+                    scale=export_scale,
+                    engine=engine
+                )
+                break
+            except Exception as e:
+                continue
+        
+        if png_bytes:
+            st.download_button(
+                "🖼️ Baixar PNG (Kaleido)", 
+                data=png_bytes,
+                file_name="grafico_3d.png", 
+                mime="image/png"
+            )
+        else:
+            st.warning("Engine Kaleido não disponível")
+            
+    except ImportError:
+        st.warning("Instale: pip install plotly[kaleido]")
 
-with st.expander("Ajuda rápida"):
-    st.markdown(
-        "- Para **PNG/SVG** sem configurações no servidor, use o **ícone de câmera** na barra do gráfico.\n"
-        "- Para o botão **PNG (servidor)** funcionar em cloud/local, instale `plotly[kaleido]` e um Chrome "
-        "(o app tenta baixar via `plotly_get_chrome`)."
-    )
+with col3:
+    # SVG como alternativa
+    try:
+        svg_bytes = fig.to_image(
+            format="svg", 
+            width=export_width, 
+            height=export_height
+        )
+        st.download_button(
+            "🎨 Baixar SVG", 
+            data=svg_bytes,
+            file_name="grafico_3d.svg", 
+            mime="image/svg+xml"
+        )
+    except Exception:
+        st.info("SVG não disponível")
+
+# ===================== Instruções de Instalação =====================
+with st.expander("🔧 Solução para problemas de exportação"):
+    st.markdown("""
+    ### Se a exportação PNG não funcionar:
+    
+    **1. Instale as dependências necessárias:**
+    ```bash
+    pip install plotly[kaleido]
+    # ou
+    pip install kaleido
+    ```
+    
+    **2. Para ambientes Docker/Cloud:**
+    ```dockerfile
+    RUN apt-get update && apt-get install -y \\
+        chromium-browser \\
+        chromium-chromedriver
+    ENV CHROME_BIN=/usr/bin/chromium-browser
+    ```
+    
+    **3. Alternativas que sempre funcionam:**
+    - Use o **botão da câmera** no próprio gráfico (canto superior direito)
+    - Baixe o **HTML interativo** e abra no navegador
+    - Use **Ctrl+P** ou **Cmd+P** no HTML para salvar como PDF
+    
+    **4. Para Streamlit Cloud:**
+    Adicione ao `requirements.txt`:
+    ```
+    plotly
+    kaleido
+    ```
+    
+    E ao `packages.txt`:
+    ```
+    chromium-browser
+    chromium-chromedriver
+    ```
+    """)
+
+# ===================== Preview dos dados =====================
+with st.expander("📊 Visualizar dados carregados"):
+    st.dataframe(df)
+    
+    # Estatísticas básicas
+    st.subheader("Estatísticas")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total de pontos", len(df))
+    with col2:
+        st.metric("Valor médio", f"{df['value'].mean():.2f}")
+    with col3:
+        st.metric("Desvio padrão médio", f"{df['std'].mean():.2f}")
 
