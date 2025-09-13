@@ -4,3 +4,4 @@ pandas
 numpy
 kaleido
 openpyxl
+matplotlib
