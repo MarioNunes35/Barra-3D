@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 Streamlit — 3D Bar Chart (Advanced)
@@ -175,9 +174,11 @@ def render_3d_bars(
 
     # Fundo
     fig.patch.set_facecolor(bg_color)
-    ax.w_xaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
-    ax.w_yaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
-    ax.w_zaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
+    # ===== CÓDIGO CORRIGIDO =====
+    ax.xaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
+    ax.yaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
+    ax.zaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
+    # ============================
 
     # Barras
     ax.bar3d(xs, ys, zs, dx, dy, dz, shade=True,
