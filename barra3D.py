@@ -15,14 +15,13 @@ Recursos principais:
 - Exportação nativa do Plotly (PNG, SVG, etc.)
 """
 import io
-from typing import List, Tuple, Optional
+from typing import Optional
 
 import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-from plotly.graph_objs import Bar3d # <--- 1. IMPORTAÇÃO ADICIONADA AQUI
 
 # -----------------------------
 # Utilidades
@@ -111,22 +110,20 @@ def render_plotly_3d_bars(
     # Lógica de traços: um traço por série se a cor for por série, senão um traço só
     if color_mode == "Por série (Y)":
         y_order = list(pd.unique(df[y_col]))
-        color_map = px.colors.get_colorscale(series_palette_name) if hasattr(px.colors.sequential, series_palette_name) else px.colors.qualitative.Plotly
+        color_map = getattr(px.colors.qualitative, series_palette_name, px.colors.qualitative.Plotly)
         
         for i, y_val in enumerate(y_order):
             df_series = df[df[y_col] == y_val]
             color_index = i % len(color_map)
             
-            # <--- 2. ALTERAÇÃO DE go.Bar3d PARA Bar3d
-            fig.add_trace(Bar3d(
+            fig.add_trace(go.Bar3d(
                 x=df_series[x_col], y=df_series[y_col], z=df_series[z_col],
                 name=str(y_val),
                 marker=dict(color=color_map[color_index]),
                 opacity=alpha
             ))
     else:
-        # <--- 2. ALTERAÇÃO DE go.Bar3d PARA Bar3d
-        fig.add_trace(Bar3d(
+        fig.add_trace(go.Bar3d(
             x=df[x_col], y=df[y_col], z=df[z_col],
             name=z_col,
             marker=dict(
@@ -182,7 +179,7 @@ def render_plotly_3d_bars(
         font=dict(size=label_size),
         plot_bgcolor=bg_color,
         paper_bgcolor=bg_color,
-        showlegend=True
+        showlegend=True if color_mode == "Por série (Y)" else False
     )
     
     return fig
@@ -191,10 +188,8 @@ def render_plotly_3d_bars(
 def main():
     st.set_page_config(page_title="Barras 3D Interativo", layout="wide")
     
-    # --- Controles na Barra Lateral ---
     st.sidebar.title("⚙️ Controles")
     
-    # Carregamento de dados
     st.sidebar.subheader("Dados")
     up = st.sidebar.file_uploader("CSV ou Excel", type=["csv", "xlsx", "xls"])
     sep = st.sidebar.text_input("Separador (CSV)", value=",", help="Ignorado para Excel.", key="sep")
@@ -273,7 +268,6 @@ def main():
         st.write("Prévia do DataFrame:")
         st.dataframe(df, use_container_width=True)
     
-    # Renderizar o gráfico Plotly
     fig = render_plotly_3d_bars(
         df=df, x_col=x_col, y_col=y_col, z_col=z_col,
         err_style=err_style, err_col=err_col,
@@ -292,7 +286,7 @@ def main():
     st.plotly_chart(fig, use_container_width=True, config={'displaylogo': False})
     
     st.caption("Passe o mouse sobre o gráfico para ver as opções de exportação (PNG, SVG, etc.).")
-    st.caption("Dica: no Streamlit Cloud, inclua no requirements.txt: streamlit, pandas, numpy, plotly.")
+    st.caption("Dica: no Streamlit Cloud, inclua no requirements.txt: streamlit, pandas, numpy, plotly>=5.15.0")
 
 if __name__ == "__main__":
     main()
