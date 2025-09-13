@@ -14,27 +14,20 @@ Recursos principais:
 - Rótulos de valores no topo das barras (formatação customizável)
 - Erros simétricos ou assimétricos renderizados como “hastes” 3D com “chapéus”
 - Controle de câmera (elevação/azimute), tema claro/escuro, grade, fundo, limites de eixos
-- Exportação em PNG/SVG com DPI customizável
-
-Requisitos:
-- streamlit
-- pandas
-- numpy
-- matplotlib
+- Exportação PNG (com DPI) e SVG
 """
-
 import io
-import math
-import sys
-import numpy as np
-import pandas as pd
-import streamlit as st
 from typing import List, Tuple, Optional
 
+import streamlit as st
+import numpy as np
+import pandas as pd
+
+# Força backend sem display (necessário no Streamlit Cloud)
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 - necessário para 3D
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from matplotlib.colors import Normalize
 from matplotlib import cm
 
@@ -42,15 +35,8 @@ from matplotlib import cm
 # -----------------------------
 # Utilidades
 # -----------------------------
-def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Garante que o DataFrame possua pelo menos 3 colunas; se não, cria um exemplo."""
-    if df is None or df.empty or df.shape[1] < 3:
-        df = sample_dataframe()
-    return df
-
-
 def sample_dataframe(n_x=4, n_y=4, seed=42) -> pd.DataFrame:
-    """Cria um conjunto de dados de exemplo (formato longo): X (cat), Y (cat), Z (valor), Err (simétrico)."""
+    """Cria dados de exemplo no formato LONGO: colunas X (cat), Y (cat), Z (valor), Err (simétrico)."""
     rng = np.random.default_rng(seed)
     xs = [f"Grupo {i+1}" for i in range(n_x)]
     ys = [f"Série {j+1}" for j in range(n_y)]
@@ -58,54 +44,82 @@ def sample_dataframe(n_x=4, n_y=4, seed=42) -> pd.DataFrame:
     for x in xs:
         for y in ys:
             z = float(rng.uniform(10, 100))
-            err = float(z * rng.uniform(0.05, 0.15))
-            data.append([x, y, z, err])
-    return pd.DataFrame(data, columns=["X", "Y", "Z", "ERR"])  # ERR simétrico por padrão
+            e = float(rng.uniform(1, 10))
+            data.append([x, y, z, e])
+    return pd.DataFrame(data, columns=["X", "Y", "Z", "Err"])
 
 
-def detect_categorical_order(series: pd.Series) -> List:
-    """Mantém a ordem de aparição, preservando duplicatas únicas na sequência."""
-    seen = set()
-    order = []
-    for item in series.tolist():
-        if item not in seen:
-            seen.add(item)
-            order.append(item)
-    return order
+def ensure_min_columns(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Garante ao menos 3 colunas (X,Y,Z). Se não houver dados, usa exemplo."""
+    if df is None or df.empty or df.shape[1] < 3:
+        return sample_dataframe()
+    return df
 
 
-def parse_order_input(text: str, detected: List) -> List:
-    """Tenta parsear uma lista separada por vírgulas; se vazio, retorna detectado."""
-    if not text or not text.strip():
-        return detected
-    parts = [p.strip() for p in text.split(",")]
-    return [p for p in parts if p in set(detected)] or detected
+def to_numeric_safe(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
 
 
-# -----------------------------
-# Renderização 3D
-# -----------------------------
-def draw_3d_bars(
+def make_facecolors(
+    df: pd.DataFrame,
+    y_order: List[str],
+    z_vals: np.ndarray,
+    color_mode: str,
+    base_color: str,
+    colormap_name: str,
+    series_palette_name: str,
+) -> List:
+    """Define as cores de cada barra conforme o modo de cor selecionado."""
+    colors = []
+
+    if color_mode == "Única":
+        colors = [base_color] * len(df)
+
+    elif color_mode == "Por série (Y)":
+        # Mapa discreto por categoria Y
+        cmap = cm.get_cmap(series_palette_name, len(y_order))
+        y_to_idx = {y: i for i, y in enumerate(y_order)}
+        for y in df["__Y__"]:
+            colors.append(cmap(y_to_idx[y]))
+
+    else:  # "Por altura (colormap)"
+        norm = Normalize(vmin=float(np.nanmin(z_vals)), vmax=float(np.nanmax(z_vals)))
+        cmap = cm.get_cmap(colormap_name)
+        for z in z_vals:
+            colors.append(cmap(norm(z)))
+
+    return colors
+
+
+def draw_error_segments(ax, segments: List[Tuple[float, float, float, float]], cap: float, color="black", lw=1.0):
+    """Desenha segmentos de erro (linha vertical com 'chapéu')."""
+    for (x, y, z0, z1) in segments:
+        # Haste vertical
+        ax.plot([x, x], [y, y], [z0, z1], color=color, linewidth=lw)
+        # Chapéu superior
+        ax.plot([x - cap, x + cap], [y, y], [z1, z1], color=color, linewidth=lw)
+        # Chapéu inferior
+        ax.plot([x - cap, x + cap], [y, y], [z0, z0], color=color, linewidth=lw)
+
+
+def render_3d_bars(
     df: pd.DataFrame,
     x_col: str,
     y_col: str,
     z_col: str,
-    err_style: str = "Nenhum",  # "Nenhum" | "Simétrico" | "Assimétrico"
+    err_style: str = "Nenhum",   # Nenhum | Simétrico | Assimétrico
     err_col: Optional[str] = None,
     err_low_col: Optional[str] = None,
     err_high_col: Optional[str] = None,
-    x_order: Optional[List] = None,
-    y_order: Optional[List] = None,
-    figsize: Tuple[float, float] = (10, 7.5),
     elev: float = 20.0,
     azim: float = -60.0,
     bar_width: float = 0.6,
     bar_depth: float = 0.6,
     alpha: float = 0.95,
     edge_on: bool = True,
-    edge_width: float = 0.5,
+    edge_width: float = 0.6,
     edge_color: str = "black",
-    color_mode: str = "Única",   # "Única" | "Por série (Y)" | "Por altura (colormap)"
+    color_mode: str = "Única",   # Única | Por série (Y) | Por altura (colormap)
     base_color: str = "#3182bd",
     colormap_name: str = "viridis",
     series_palette_name: str = "tab10",
@@ -127,92 +141,52 @@ def draw_3d_bars(
     cap_ratio: float = 0.6,  # largura do “chapéu” de erro em relação à largura da barra
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
-    Renderiza as barras 3D usando Matplotlib e retorna (fig, ax).
+    Desenha o gráfico 3D de barras e retorna (fig, ax).
+    O DataFrame pode ter X e Y categóricos. Z deve ser numérico.
     """
+    df = df.copy()
 
-    # Preparação dos dados e ordens
-    if x_order is None:
-        x_order = detect_categorical_order(df[x_col])
-    if y_order is None:
-        y_order = detect_categorical_order(df[y_col])
+    # Ordena categorias X/Y na ordem de aparição
+    x_order = list(pd.unique(df[x_col]))
+    y_order = list(pd.unique(df[y_col]))
 
-    x_index = {val: i for i, val in enumerate(x_order)}
-    y_index = {val: i for i, val in enumerate(y_order)}
+    df["__X__"] = pd.Categorical(df[x_col], categories=x_order, ordered=True)
+    df["__Y__"] = pd.Categorical(df[y_col], categories=y_order, ordered=True)
+    df["__Z__"] = to_numeric_safe(df[z_col])
 
-    # Mapeia cores de série (Y) se necessário
-    if color_mode == "Por série (Y)":
-        palette = plt.get_cmap(series_palette_name)
-        colors_by_y = {y: palette(i / max(1, len(y_order) - 1)) for i, y in enumerate(y_order)}
-    elif color_mode == "Por altura (colormap)":
-        cmap = cm.get_cmap(colormap_name)
-        z_vals = df[z_col].astype(float).values
-        z_min = float(np.min(z_vals)) if zmin is None else zmin
-        z_max = float(np.max(z_vals)) if zmax is None else zmax
-        norm = Normalize(vmin=z_min, vmax=z_max)
+    # Filtra linhas com Z válido
+    df = df[~df["__Z__"].isna()].reset_index(drop=True)
 
-    # Figura/Axes
-    fig = plt.figure(figsize=figsize, facecolor=bg_color)
+    # Coordenadas numéricas para as barras
+    xs = df["__X__"].cat.codes.to_numpy(dtype=float)
+    ys = df["__Y__"].cat.codes.to_numpy(dtype=float)
+    zs = np.zeros_like(xs, dtype=float)  # base das barras no plano z=0
+    dz = df["__Z__"].to_numpy(dtype=float)
+
+    dx = np.full_like(xs, fill_value=float(bar_width))
+    dy = np.full_like(xs, fill_value=float(bar_depth))
+
+    # Cores
+    facecolors = make_facecolors(df, y_order, dz, color_mode, base_color, colormap_name, series_palette_name)
+
+    # Figure/Axes
+    fig = plt.figure(figsize=(10, 7), dpi=150)
     ax = fig.add_subplot(111, projection="3d")
-    ax.view_init(elev=elev, azim=azim)
 
-    # Ajustes visuais
+    # Fundo
+    fig.patch.set_facecolor(bg_color)
     ax.w_xaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
     ax.w_yaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
     ax.w_zaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
-    ax.grid(show_grid)
 
-    # Construção dos vetores para bar3d
-    xs = []
-    ys = []
-    zs = []  # base (normalmente 0)
-    dx = []
-    dy = []
-    dz = []
-    facecolors = []
+    # Barras
+    ax.bar3d(xs, ys, zs, dx, dy, dz, shade=True,
+             color=facecolors,
+             edgecolor=edge_color if edge_on else None,
+             linewidth=edge_width,
+             alpha=alpha)
 
-    # Para rótulos de valores e erros
-    value_labels = []
-    error_segments = []  # lista de tuplas: (x, y, z_bottom, z_top, cap_half)
-
-    for _, row in df.iterrows():
-        xv = x_index[row[x_col]]
-        yv = y_index[row[y_col]]
-        z = float(row[z_col])
-        xs.append(xv - bar_width / 2.0)
-        ys.append(yv - bar_depth / 2.0)
-        zs.append(0.0)  # base
-        dx.append(bar_width)
-        dy.append(bar_depth)
-        dz.append(z)
-
-        # Determina a cor
-        if color_mode == "Única":
-            facecolors.append(base_color)
-        elif color_mode == "Por série (Y)":
-            facecolors.append(colors_by_y[row[y_col]])
-        else:  # "Por altura (colormap)"
-            facecolors.append(cmap(norm(z)))
-
-        # Guarda info para rótulo e possíveis erros
-        x_center = xv
-        y_center = yv
-        value_labels.append((x_center, y_center, z))
-
-        if err_style == "Simétrico" and err_col and not pd.isna(row.get(err_col, np.nan)):
-            e = float(row[err_col])
-            error_segments.append((x_center, y_center, z - e, z + e))
-        elif err_style == "Assimétrico" and (err_low_col and err_high_col):
-            low = row.get(err_low_col, np.nan)
-            high = row.get(err_high_col, np.nan)
-            if not (pd.isna(low) or pd.isna(high)):
-                low = float(low)
-                high = float(high)
-                error_segments.append((x_center, y_center, z - low, z + high))
-
-    # Desenha barras
-    ax.bar3d(xs, ys, zs, dx, dy, dz, shade=True, color=facecolors, edgecolor=edge_color if edge_on else None, linewidth=edge_width, alpha=alpha)
-
-    # Ticks e rótulos de eixos
+    # Rótulos/ticks
     ax.set_title(title, fontsize=title_size, pad=12)
     ax.set_xlabel(xlabel, fontsize=label_size, labelpad=10)
     ax.set_ylabel(ylabel, fontsize=label_size, labelpad=10)
@@ -226,260 +200,232 @@ def draw_3d_bars(
     # Limites Z
     if zmin is not None or zmax is not None:
         current = ax.get_zlim()
-        zlo = zmin if zmin is not None else current[0]
-        zhi = zmax if zmax is not None else current[1]
-        if zhi <= zlo:
-            zhi = zlo + 1.0
-        ax.set_zlim(zlo, zhi)
+        z0 = zmin if zmin is not None else current[0]
+        z1 = zmax if zmax is not None else current[1]
+        if z0 == z1:
+            z1 = z0 + 1.0
+        ax.set_zlim(z0, z1)
 
-    # Rótulos de valores no topo das barras
+    # Grid
+    ax.grid(show_grid)
+
+    # Câmera
+    ax.view_init(elev=elev, azim=azim)
+
+    # Erros
+    segments = []
+    if err_style == "Simétrico" and err_col and (err_col in df.columns):
+        e = to_numeric_safe(df[err_col]).to_numpy(dtype=float)
+        for x, y, z, ee, w in zip(xs, ys, dz, e, dx):
+            if not np.isnan(ee):
+                z0, z1 = z - ee, z + ee
+                cap = (w * cap_ratio) / 2.0
+                segments.append((x + w/2.0, y + (bar_depth/2.0), z0, z1))
+
+    elif err_style == "Assimétrico" and (err_low_col in df.columns) and (err_high_col in df.columns):
+        low = to_numeric_safe(df[err_low_col]).to_numpy(dtype=float)
+        high = to_numeric_safe(df[err_high_col]).to_numpy(dtype=float)
+        for x, y, z, lo, hi, w in zip(xs, ys, dz, low, high, dx):
+            if not (np.isnan(lo) or np.isnan(hi)):
+                z0, z1 = z - lo, z + hi
+                cap = (w * cap_ratio) / 2.0
+                segments.append((x + w/2.0, y + (bar_depth/2.0), z0, z1))
+
+    if segments:
+        cap = (float(bar_width) * cap_ratio) / 2.0
+        draw_error_segments(ax, segments, cap=cap, color=edge_color, lw=max(1.0, edge_width))
+
+    # Valores no topo
     if show_values:
-        for (xc, yc, z) in value_labels:
-            ax.text(
-                xc,
-                yc,
-                z + max(0.001, value_offset * (ax.get_zlim()[1] - ax.get_zlim()[0])),
-                value_fmt.format(z),
-                ha="center",
-                va="bottom",
-                fontsize=tick_size,
-                color="black",
-                zdir=None,
-            )
-
-    # Erros: hastes + chapéus
-    if error_segments:
-        cap_half = (bar_width * cap_ratio) / 2.0
-        for (xc, yc, z_bottom, z_top) in error_segments:
-            # haste vertical
-            ax.plot([xc, xc], [yc, yc], [z_bottom, z_top], color=edge_color, linewidth=edge_width + 0.2, alpha=min(1.0, alpha + 0.05))
-            # chapéus
-            ax.plot([xc - cap_half, xc + cap_half], [yc, yc], [z_top, z_top], color=edge_color, linewidth=edge_width + 0.2, alpha=min(1.0, alpha + 0.05))
-            ax.plot([xc - cap_half, xc + cap_half], [yc, yc], [z_bottom, z_bottom], color=edge_color, linewidth=edge_width + 0.2, alpha=min(1.0, alpha + 0.05))
-
-    # Fundo
-    fig.patch.set_facecolor(bg_color)
+        for x, y, z, w, d in zip(xs, ys, dz, dx, dy):
+            x_center = x + w/2.0
+            y_center = y + d/2.0
+            ax.text(x_center, y_center, z + value_offset, value_fmt.format(z),
+                    ha="center", va="bottom", fontsize=max(8, tick_size))
 
     return fig, ax
 
 
-def export_figure(fig: plt.Figure, fmt: str = "png", dpi: int = 300) -> bytes:
-    bio = io.BytesIO()
-    fig.savefig(bio, format=fmt, dpi=dpi, bbox_inches="tight")
-    bio.seek(0)
-    return bio.read()
-
-
-# -----------------------------
-# App Streamlit
-# -----------------------------
 def main():
-    st.set_page_config(page_title="Barras 3D — Avançado", layout="wide")
-    st.title("Gráfico de Barras 3D — Opções Avançadas")
+    st.set_page_config(page_title="Barras 3D Avançado", layout="wide")
+    st.title("📊 Barras 3D — Avançado (Matplotlib)")
 
-    with st.expander("📥 Dados", expanded=True):
-        col_u1, col_u2 = st.columns([1, 1])
-        with col_u1:
-            up = st.file_uploader("Envie um CSV ou Excel (long format, com colunas para X, Y, Z e erros opcionais)", type=["csv", "xlsx"])
-            sep = st.text_input("Separador (apenas para CSV)", value=",")
-        with col_u2:
-            st.caption("Dica: se não enviar nenhum arquivo, um dataset de exemplo será carregado.")
-            use_editor = st.checkbox("Editar dados com data editor (recomendado para pequenos ajustes)", value=False)
+    with st.expander("ℹ️ Como usar", expanded=False):
+        st.markdown(
+            """
+            1) Envie um CSV/Excel com colunas para **X**, **Y** e **Z** (opcional: **Err** ou **ErrLow/ErrHigh**).  
+            2) Ajuste as opções de cor, câmera, rótulos e limites.  
+            3) Exporte como PNG (com DPI) ou SVG.  
 
-        df = None
-        if up is not None:
-            try:
-                if up.name.lower().endswith(".csv"):
-                    df = pd.read_csv(up, sep=sep)
-                else:
-                    df = pd.read_excel(up)
-            except Exception as e:
-                st.error(f"Falha ao ler arquivo: {e}")
-                df = None
+            **Dica:** Se aparecer erro `ModuleNotFoundError: No module named 'matplotlib'`, adicione `matplotlib` no `requirements.txt`.
+            """
+        )
 
-        df = ensure_columns(df)
-        st.write("Prévia do DataFrame original:")
-        st.dataframe(df, use_container_width=True)
+    # Carregamento de dados
+    st.subheader("Dados")
+    up = st.file_uploader("CSV ou Excel", type=["csv", "xlsx", "xls"])
+    sep = st.text_input("Separador (CSV)", value=",", help="Ignorado para Excel.", key="sep")
+    use_editor = st.checkbox("Editar dados após carregar", value=False)
 
-        if use_editor:
-            df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+    df = None
+    if up:
+        try:
+            if up.name.lower().endswith(".csv"):
+                df = pd.read_csv(up, sep=sep)
+            else:
+                df = pd.read_excel(up)
+        except Exception as e:
+            st.error(f"Falha ao ler arquivo: {e}")
+            df = None
 
-        # Mapeamento de colunas
-        cols = list(df.columns)
-        st.subheader("Mapeamento de Colunas")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            x_col = st.selectbox("Coluna X (categoria ou número)", options=cols, index=0)
-        with c2:
-            y_col = st.selectbox("Coluna Y (categoria ou número)", options=cols, index=1 if len(cols) > 1 else 0)
-        with c3:
-            z_col = st.selectbox("Coluna Z (altura)", options=cols, index=2 if len(cols) > 2 else 0)
+    df = ensure_min_columns(df)
+    st.write("Prévia do DataFrame:")
+    st.dataframe(df, use_container_width=True)
 
-        st.markdown("---")
-        st.subheader("Erros (opcional)")
-        err_style = st.radio("Tipo de erro", options=["Nenhum", "Simétrico", "Assimétrico"], horizontal=True, index=0)
-        err_col = err_low_col = err_high_col = None
-        if err_style == "Simétrico":
-            err_col = st.selectbox("Coluna de erro (±)", options=["(nenhuma)"] + cols, index=0)
-            if err_col == "(nenhuma)":
-                err_col = None
-        elif err_style == "Assimétrico":
-            c1e, c2e = st.columns(2)
-            with c1e:
-                err_low_col = st.selectbox("Erro inferior", options=["(nenhuma)"] + cols, index=0)
-                if err_low_col == "(nenhuma)":
-                    err_low_col = None
-            with c2e:
-                err_high_col = st.selectbox("Erro superior", options=["(nenhuma)"] + cols, index=0)
-                if err_high_col == "(nenhuma)":
-                    err_high_col = None
+    if use_editor:
+        df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
 
-        st.markdown("---")
-        st.subheader("Ordenação (categorias)")
-        detected_x = detect_categorical_order(df[x_col])
-        detected_y = detect_categorical_order(df[y_col])
-        ox = st.text_input("Ordem do eixo X (separada por vírgulas). Deixe vazio para detectar automaticamente.", value="")
-        oy = st.text_input("Ordem do eixo Y (separada por vírgulas). Deixe vazio para detectar automaticamente.", value="")
-        x_order = parse_order_input(ox, detected_x)
-        y_order = parse_order_input(oy, detected_y)
+    # Mapeamento de colunas
+    st.subheader("Mapeamento de Colunas")
+    cols = list(df.columns)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        x_col = st.selectbox("Coluna X (categoria ou número)", options=cols, index=0)
+    with c2:
+        y_col = st.selectbox("Coluna Y (categoria ou número)", options=cols, index=1 if len(cols) > 1 else 0)
+    with c3:
+        z_col = st.selectbox("Coluna Z (altura)", options=cols, index=2 if len(cols) > 2 else 0)
 
-    with st.expander("🎨 Personalização do Gráfico", expanded=True):
-        st.subheader("Estilo e Câmera")
-        cs1, cs2, cs3, cs4 = st.columns(4)
-        with cs1:
-            elev = st.slider("Elevação da câmera (elev)", 0, 90, 20)
-        with cs2:
-            azim = st.slider("Azimute da câmera (azim)", -180, 180, -60)
-        with cs3:
-            width_in = st.number_input("Largura da figura (pol.)", 4.0, 24.0, 10.0, step=0.5)
-        with cs4:
-            height_in = st.number_input("Altura da figura (pol.)", 3.0, 20.0, 7.5, step=0.5)
+    st.markdown("---")
+    st.subheader("Erros (opcional)")
+    err_style = st.radio("Tipo de erro", options=["Nenhum", "Simétrico", "Assimétrico"], horizontal=True, index=0)
+    err_col = err_low_col = err_high_col = None
+    if err_style == "Simétrico":
+        err_col = st.selectbox("Coluna de erro (±)", options=["—"] + cols, index=0)
+        if err_col == "—":
+            err_style = "Nenhum"
+            err_col = None
+    elif err_style == "Assimétrico":
+        sel = st.columns(2)
+        with sel[0]:
+            err_low_col = st.selectbox("Coluna de erro -", options=["—"] + cols, index=0)
+        with sel[1]:
+            err_high_col = st.selectbox("Coluna de erro +", options=["—"] + cols, index=0)
+        if err_low_col == "—" or err_high_col == "—":
+            err_style = "Nenhum"
+            err_low_col = err_high_col = None
 
-        st.subheader("Barras")
-        cb1, cb2, cb3, cb4 = st.columns(4)
-        with cb1:
-            bar_width = st.slider("Largura da barra (dx)", 0.1, 1.0, 0.6, step=0.05)
-        with cb2:
-            bar_depth = st.slider("Profundidade da barra (dy)", 0.1, 1.0, 0.6, step=0.05)
-        with cb3:
-            alpha = st.slider("Opacidade (alpha)", 0.1, 1.0, 0.95, step=0.05)
-        with cb4:
-            edge_on = st.checkbox("Borda ativada", value=True)
-        cb5, cb6, cb7 = st.columns([1,1,2])
-        with cb5:
-            edge_width = st.number_input("Espessura da borda", 0.0, 5.0, 0.5, step=0.1)
-        with cb6:
-            edge_color = st.color_picker("Cor da borda", value="#000000")
-        with cb7:
-            color_mode = st.selectbox("Modo de cor", ["Única", "Por série (Y)", "Por altura (colormap)"], index=0)
+    st.markdown("---")
+    st.subheader("Cores e Aparência")
+    ap1, ap2, ap3 = st.columns(3)
+    with ap1:
+        bar_width = st.number_input("Largura (X) da barra", 0.05, 1.0, 0.6, step=0.05)
+        bar_depth = st.number_input("Profundidade (Y) da barra", 0.05, 1.0, 0.6, step=0.05)
+        alpha = st.slider("Transparência (alpha)", 0.1, 1.0, 0.95, step=0.05)
+    with ap2:
+        edge_on = st.checkbox("Mostrar borda", value=True)
+        edge_width = st.number_input("Espessura da borda", 0.0, 5.0, 0.6, step=0.1)
+        edge_color = st.color_picker("Cor da borda", value="#000000")
+    with ap3:
+        color_mode = st.selectbox("Modo de cor", ["Única", "Por série (Y)", "Por altura (colormap)"], index=0)
 
-        cc1, cc2, cc3 = st.columns(3)
-        base_color = "#3182bd"
-        colormap_name = "viridis"
-        series_palette_name = "tab10"
-        with cc1:
-            if color_mode == "Única":
-                base_color = st.color_picker("Cor base", value=base_color)
-            elif color_mode == "Por altura (colormap)":
-                colormap_name = st.selectbox("Colormap", sorted(m for m in plt.colormaps() if not m.endswith("_r")), index=sorted(m for m in plt.colormaps() if not m.endswith("_r")).index("viridis"))
-        with cc2:
-            if color_mode == "Por série (Y)":
-                series_palette_name = st.selectbox("Paleta de séries (Y)", options=["tab10", "tab20", "Set3", "Pastel1", "Accent"], index=0)
-        with cc3:
-            st.caption("Dica: escolha 'Por altura (colormap)' para mapear cores pela magnitude do Z.")
+    cc1, cc2, cc3 = st.columns(3)
+    with cc1:
+        if color_mode == "Única":
+            base_color = st.color_picker("Cor base", value="#3182bd")
+        else:
+            base_color = "#3182bd"
+        if color_mode == "Por altura (colormap)":
+            colormap_name = st.selectbox("Colormap", sorted([m for m in plt.colormaps() if not str(m).endswith('_r')]), index=sorted([m for m in plt.colormaps() if not str(m).endswith('_r')]).index("viridis"))
+        else:
+            colormap_name = "viridis"
+    with cc2:
+        if color_mode == "Por série (Y)":
+            series_palette_name = st.selectbox("Paleta de séries", options=["tab10", "tab20", "Set3", "Pastel1", "Accent"], index=0)
+        else:
+            series_palette_name = "tab10"
+    with cc3:
+        show_values = st.checkbox("Mostrar valores no topo", value=True)
+        value_fmt = st.text_input("Formato do valor", value="{:.2f}")
+        value_offset = st.number_input("Offset em Z dos valores", 0.0, 1.0, 0.02, step=0.01)
 
-        st.subheader("Rótulos e Legendas")
-        rl1, rl2, rl3 = st.columns(3)
-        with rl1:
-            title = st.text_input("Título", value="Gráfico de Barras 3D")
-            xlabel = st.text_input("Rótulo eixo X", value="X")
-        with rl2:
-            ylabel = st.text_input("Rótulo eixo Y", value="Y")
-            zlabel = st.text_input("Rótulo eixo Z", value="Z")
-        with rl3:
-            title_size = st.slider("Tamanho do título", 8, 40, 16)
-            label_size = st.slider("Tamanho rótulos de eixo", 6, 30, 12)
-            tick_size = st.slider("Tamanho dos ticks", 6, 30, 10)
+    st.subheader("Rótulos, Limites e Câmera")
+    rl1, rl2, rl3 = st.columns(3)
+    with rl1:
+        title = st.text_input("Título", value="Gráfico de Barras 3D")
+        xlabel = st.text_input("Rótulo eixo X", value="X")
+    with rl2:
+        ylabel = st.text_input("Rótulo eixo Y", value="Y")
+        zlabel = st.text_input("Rótulo eixo Z", value="Z")
+    with rl3:
+        label_size = st.number_input("Tamanho rótulos (label)", 6, 30, 12, step=1)
+        tick_size = st.number_input("Tamanho dos ticks", 6, 30, 10, step=1)
+        title_size = st.number_input("Tamanho do título", 8, 40, 16, step=1)
 
-        st.subheader("Valores e Erros")
-        ve1, ve2, ve3, ve4 = st.columns(4)
-        with ve1:
-            show_values = st.checkbox("Mostrar valores no topo", value=True)
-        with ve2:
-            value_fmt = st.text_input("Formato do valor", value="{:.2f}")
-        with ve3:
-            value_offset = st.number_input("Offset vertical do valor (fração do eixo Z)", 0.0, 0.2, 0.02, step=0.005)
-        with ve4:
-            cap_ratio = st.slider("Largura do chapéu do erro (relativa à barra)", 0.2, 1.2, 0.6, step=0.05)
+    cam1, cam2, cam3 = st.columns(3)
+    with cam1:
+        elev = st.slider("Elevação da câmera", -10, 90, 20, step=1)
+    with cam2:
+        azim = st.slider("Azimute da câmera", -180, 180, -60, step=5)
+    with cam3:
+        show_grid = st.checkbox("Mostrar grade", value=True)
 
-        st.subheader("Fundo e Eixos")
-        fe1, fe2, fe3 = st.columns(3)
-        with fe1:
-            bg_color = st.color_picker("Cor de fundo", value="#ffffff")
-        with fe2:
-            pane_color = st.color_picker("Cor do plano (pane)", value="#f5f5f5")
-        with fe3:
-            show_grid = st.checkbox("Mostrar grade", value=True)
+    bg1, bg2, bg3 = st.columns(3)
+    with bg1:
+        zmin = st.number_input("Z mínimo (opcional)", value=0.0, step=1.0)
+        use_zmin = st.checkbox("Fixar Zmín", value=False)
+    with bg2:
+        zmax = st.number_input("Z máximo (opcional)", value=100.0, step=1.0)
+        use_zmax = st.checkbox("Fixar Zmáx", value=False)
+    with bg3:
+        bg_color = st.color_picker("Cor de fundo da figura", value="#ffffff")
+        pane_color = st.color_picker("Cor do plano 3D", value="#f5f5f5")
 
-        st.subheader("Limites de Z (opcional)")
-        lz1, lz2 = st.columns(2)
-        with lz1:
-            zmin_en = st.checkbox("Definir Zmín", value=False)
-            zmin_val = st.number_input("Z mín (se ativado)", value=0.0, step=1.0)
-        with lz2:
-            zmax_en = st.checkbox("Definir Zmáx", value=False)
-            zmax_val = st.number_input("Z máx (se ativado)", value=100.0, step=1.0)
+    cap_ratio = st.slider("Largura do 'chapéu' de erro (fração da barra)", 0.1, 1.0, 0.6, step=0.05)
 
     # Render
-    st.markdown("---")
-    st.subheader("📊 Resultado")
-    zmin = zmin_val if zmin_en else None
-    zmax = zmax_val if zmax_en else None
-
-    fig, ax = draw_3d_bars(
+    fig, ax = render_3d_bars(
         df=df,
         x_col=x_col,
         y_col=y_col,
         z_col=z_col,
         err_style=err_style,
-        err_col=err_col,
-        err_low_col=err_low_col,
-        err_high_col=err_high_col,
-        x_order=x_order,
-        y_order=y_order,
-        figsize=(width_in, height_in),
-        elev=elev,
-        azim=azim,
-        bar_width=bar_width,
-        bar_depth=bar_depth,
-        alpha=alpha,
-        edge_on=edge_on,
-        edge_width=edge_width,
-        edge_color=edge_color,
-        color_mode=color_mode,
-        base_color=base_color,
-        colormap_name=colormap_name,
-        series_palette_name=series_palette_name,
-        show_values=show_values,
-        value_fmt=value_fmt,
-        value_offset=value_offset,
-        zmin=zmin,
-        zmax=zmax,
-        show_grid=show_grid,
-        bg_color=bg_color,
-        pane_color=pane_color,
-        title=title,
-        xlabel=xlabel,
-        ylabel=ylabel,
-        zlabel=zlabel,
-        label_size=label_size,
-        tick_size=tick_size,
-        title_size=title_size,
-        cap_ratio=cap_ratio,
+        err_col=err_col if err_style == "Simétrico" else None,
+        err_low_col=err_low_col if err_style == "Assimétrico" else None,
+        err_high_col=err_high_col if err_style == "Assimétrico" else None,
+        elev=float(elev),
+        azim=float(azim),
+        bar_width=float(bar_width),
+        bar_depth=float(bar_depth),
+        alpha=float(alpha),
+        edge_on=bool(edge_on),
+        edge_width=float(edge_width),
+        edge_color=str(edge_color),
+        color_mode=str(color_mode),
+        base_color=str(base_color),
+        colormap_name=str(colormap_name),
+        series_palette_name=str(series_palette_name),
+        show_values=bool(show_values),
+        value_fmt=str(value_fmt),
+        value_offset=float(value_offset),
+        zmin=float(zmin) if use_zmin else None,
+        zmax=float(zmax) if use_zmax else None,
+        show_grid=bool(show_grid),
+        bg_color=str(bg_color),
+        pane_color=str(pane_color),
+        title=str(title),
+        xlabel=str(xlabel),
+        ylabel=str(ylabel),
+        zlabel=str(zlabel),
+        label_size=int(label_size),
+        tick_size=int(tick_size),
+        title_size=int(title_size),
+        cap_ratio=float(cap_ratio),
     )
 
     st.pyplot(fig, use_container_width=True)
 
+    # Exportação
     with st.expander("💾 Exportar figura"):
         ex1, ex2, ex3 = st.columns(3)
         with ex1:
@@ -487,31 +433,31 @@ def main():
         with ex2:
             dpi = st.slider("DPI (apenas PNG)", 72, 600, 300, step=10)
         with ex3:
-            fname = st.text_input("Nome do arquivo (sem extensão)", value="barras3d_advanced")
+            file_name = st.text_input("Nome do arquivo (sem extensão)", value="barras3d")
 
-        bio = io.BytesIO()
+        b = io.BytesIO()
         if fmt == "png":
-            fig.savefig(bio, format="png", dpi=dpi, bbox_inches="tight")
+            fig.savefig(b, format="png", dpi=int(dpi), bbox_inches="tight", facecolor=fig.get_facecolor())
             mime = "image/png"
             ext = "png"
         else:
-            fig.savefig(bio, format="svg", bbox_inches="tight")
+            fig.savefig(b, format="svg", bbox_inches="tight", facecolor=fig.get_facecolor())
             mime = "image/svg+xml"
             ext = "svg"
-        bio.seek(0)
+        b.seek(0)
         st.download_button(
             label=f"⬇️ Baixar {ext.upper()}",
-            data=bio,
-            file_name=f"{fname}.{ext}",
+            data=b,
+            file_name=f"{file_name}.{ext}",
             mime=mime,
             use_container_width=True
         )
 
-    st.markdown("---")
-    st.caption("Dica: para usar no Streamlit Cloud, adicione `streamlit`, `pandas`, `numpy` e `matplotlib` ao requirements.txt.")
+    st.caption("Dica: no Streamlit Cloud, inclua no requirements.txt: streamlit, numpy, pandas, matplotlib.")
 
 if __name__ == "__main__":
     main()
+
 
 
 
