@@ -2,7 +2,7 @@
 """
 Streamlit — 3D Bar Chart (Advanced) with Plotly
 Author: Gemini
-Date: 2025-09-13
+Date: 2025-09-13 (Corrected)
 
 Recursos principais:
 - Gráfico 3D interativo com Plotly (rotação, zoom, pan)
@@ -15,7 +15,7 @@ Recursos principais:
 - Exportação nativa do Plotly (PNG, SVG, etc.)
 """
 import io
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
 
 import streamlit as st
 import numpy as np
@@ -61,6 +61,20 @@ def degrees_to_plotly_camera(elev, azim, dist=1.75):
     
     return dict(x=x, y=y, z=z)
 
+def create_bar_mesh_data(x_pos, y_pos, z_val, dx=0.8, dy=0.8) -> Tuple[List, List, List, List, List, List]:
+    """Cria os vértices e faces para um único paralelepípedo (barra) no Mesh3d."""
+    # 8 vértices do paralelepípedo
+    x_verts = [x_pos - dx/2, x_pos + dx/2, x_pos + dx/2, x_pos - dx/2, x_pos - dx/2, x_pos + dx/2, x_pos + dx/2, x_pos - dx/2]
+    y_verts = [y_pos - dy/2, y_pos - dy/2, y_pos + dy/2, y_pos + dy/2, y_pos - dy/2, y_pos - dy/2, y_pos + dy/2, y_pos + dy/2]
+    z_verts = [0, 0, 0, 0, z_val, z_val, z_val, z_val]
+
+    # 12 faces triangulares
+    i = [7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2]
+    j = [3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3]
+    k = [0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6]
+    
+    return x_verts, y_verts, z_verts, i, j, k
+
 def render_plotly_3d_bars(
     df: pd.DataFrame,
     x_col: str,
@@ -100,39 +114,70 @@ def render_plotly_3d_bars(
 
     fig = go.Figure()
 
-    # Lógica de Cores
-    colors = None
-    if color_mode == "Única":
-        colors = base_color
-    elif color_mode == "Por altura (colormap)":
-        colors = df[z_col]
+    # Mapear eixos categóricos para numéricos para posicionamento
+    x_cats = pd.unique(df[x_col])
+    y_cats = pd.unique(df[y_col])
+    x_map = {cat: i for i, cat in enumerate(x_cats)}
+    y_map = {cat: i for i, cat in enumerate(y_cats)}
+    df['_x_num'] = df[x_col].map(x_map)
+    df['_y_num'] = df[y_col].map(y_map)
 
-    # Lógica de traços: um traço por série se a cor for por série, senão um traço só
+    # Lógica de Cores e Traços
     if color_mode == "Por série (Y)":
-        y_order = list(pd.unique(df[y_col]))
         color_map = getattr(px.colors.qualitative, series_palette_name, px.colors.qualitative.Plotly)
         
-        for i, y_val in enumerate(y_order):
+        for i, y_val in enumerate(y_cats):
             df_series = df[df[y_col] == y_val]
-            color_index = i % len(color_map)
+            color = color_map[i % len(color_map)]
             
-            fig.add_trace(go.Bar3d(
-                x=df_series[x_col], y=df_series[y_col], z=df_series[z_col],
-                name=str(y_val),
-                marker=dict(color=color_map[color_index]),
-                opacity=alpha
+            # Agrupar dados do mesh para este traço
+            mesh_x, mesh_y, mesh_z, mesh_i, mesh_j, mesh_k = [], [], [], [], [], []
+            base_index = 0
+            for _, row in df_series.iterrows():
+                x_v, y_v, z_v, i_v, j_v, k_v = create_bar_mesh_data(row['_x_num'], row['_y_num'], row[z_col])
+                mesh_x.extend(x_v)
+                mesh_y.extend(y_v)
+                mesh_z.extend(z_v)
+                mesh_i.extend([idx + base_index for idx in i_v])
+                mesh_j.extend([idx + base_index for idx in j_v])
+                mesh_k.extend([idx + base_index for idx in k_v])
+                base_index += 8
+
+            fig.add_trace(go.Mesh3d(
+                x=mesh_x, y=mesh_y, z=mesh_z,
+                i=mesh_i, j=mesh_j, k=mesh_k,
+                color=color, opacity=alpha, name=str(y_val)
             ))
     else:
-        fig.add_trace(go.Bar3d(
-            x=df[x_col], y=df[y_col], z=df[z_col],
-            name=z_col,
-            marker=dict(
-                color=colors,
-                colorscale=colormap_name if color_mode == "Por altura (colormap)" else None,
-                colorbar=dict(title=z_col) if color_mode == "Por altura (colormap)" else None,
-            ),
-            opacity=alpha
-        ))
+        # Agrupar todos os dados do mesh em um único traço
+        mesh_x, mesh_y, mesh_z, mesh_i, mesh_j, mesh_k = [], [], [], [], [], []
+        intensities = []
+        base_index = 0
+        for _, row in df.iterrows():
+            x_v, y_v, z_v, i_v, j_v, k_v = create_bar_mesh_data(row['_x_num'], row['_y_num'], row[z_col])
+            mesh_x.extend(x_v)
+            mesh_y.extend(y_v)
+            mesh_z.extend(z_v)
+            mesh_i.extend([idx + base_index for idx in i_v])
+            mesh_j.extend([idx + base_index for idx in j_v])
+            mesh_k.extend([idx + base_index for idx in k_v])
+            base_index += 8
+            if color_mode == "Por altura (colormap)":
+                intensities.extend([row[z_col]] * 8) # intensidade por vértice
+
+        trace_params = {
+            'x': mesh_x, 'y': mesh_y, 'z': mesh_z,
+            'i': mesh_i, 'j': mesh_j, 'k': mesh_k,
+            'opacity': alpha, 'name': z_col
+        }
+        if color_mode == "Única":
+            trace_params['color'] = base_color
+        elif color_mode == "Por altura (colormap)":
+            trace_params['intensity'] = intensities
+            trace_params['colorscale'] = colormap_name
+            trace_params['colorbar'] = dict(title=z_col)
+        
+        fig.add_trace(go.Mesh3d(**trace_params))
 
     # Adicionar Erros
     if err_style != "Nenhum":
@@ -149,16 +194,22 @@ def render_plotly_3d_bars(
         
         err_df.dropna(subset=['z_low', 'z_high'], inplace=True)
         
+        # Agrupar todos os erros em um único Scatter3d para performance
+        err_x, err_y, err_z = [], [], []
         for _, row in err_df.iterrows():
-            fig.add_trace(go.Scatter3d(
-                x=[row[x_col], row[x_col]], y=[row[y_col], row[y_col]], z=[row['z_low'], row['z_high']],
-                mode='lines', line=dict(color='black', width=3), showlegend=False
-            ))
+            err_x.extend([row['_x_num'], row['_x_num'], None])
+            err_y.extend([row['_y_num'], row['_y_num'], None])
+            err_z.extend([row['z_low'], row['z_high'], None])
+
+        fig.add_trace(go.Scatter3d(
+            x=err_x, y=err_y, z=err_z,
+            mode='lines', line=dict(color='black', width=3), showlegend=False
+        ))
 
     # Adicionar Rótulos de Valores
     if show_values:
         fig.add_trace(go.Scatter3d(
-            x=df[x_col], y=df[y_col], z=df[z_col] + value_offset,
+            x=df['_x_num'], y=df['_y_num'], z=df[z_col] + value_offset,
             mode='text',
             text=[value_fmt.format(val) for val in df[z_col]],
             textfont=dict(size=tick_size, color='black'),
@@ -171,8 +222,14 @@ def render_plotly_3d_bars(
     fig.update_layout(
         title=dict(text=title, font=dict(size=title_size)),
         scene=dict(
-            xaxis=dict(title=xlabel, showgrid=show_grid, backgroundcolor=pane_color),
-            yaxis=dict(title=ylabel, showgrid=show_grid, backgroundcolor=pane_color),
+            xaxis=dict(
+                title=xlabel, showgrid=show_grid, backgroundcolor=pane_color,
+                tickvals=list(x_map.values()), ticktext=list(x_map.keys())
+            ),
+            yaxis=dict(
+                title=ylabel, showgrid=show_grid, backgroundcolor=pane_color,
+                tickvals=list(y_map.values()), ticktext=list(y_map.keys())
+            ),
             zaxis=dict(title=zlabel, showgrid=show_grid, backgroundcolor=pane_color, range=[zmin, zmax]),
             camera=dict(eye=camera)
         ),
