@@ -1,2 +1,1 @@
-chromium-browser
-libxrender1
+chromium
