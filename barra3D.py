@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Streamlit — 3D Bar Chart (Advanced)
-Author: ChatGPT
+Streamlit — 3D Bar Chart (Advanced) with Plotly
+Author: Gemini
 Date: 2025-09-13
 
 Recursos principais:
+- Gráfico 3D interativo com Plotly (rotação, zoom, pan)
 - Upload de CSV/Excel e editor de dados integrado
 - Mapeamento de colunas (X, Y, Z, erros)
-- Barras 3D com Matplotlib (sem dependência de Chrome/Kaleido)
 - Barras com coloração fixa, por série (Y) ou por altura (colormap)
-- Barras com largura/profundidade/espessura da borda ajustáveis
-- Rótulos de valores no topo das barras (formatação customizável)
-- Erros simétricos ou assimétricos renderizados como “hastes” 3D com “chapéus”
-- Controle de câmera (elevação/azimute), tema claro/escuro, grade, fundo, limites de eixos
-- Exportação PNG (com DPI) e SVG
+- Rótulos de valores no topo das barras
+- Erros simétricos ou assimétricos renderizados como linhas 3D
+- Controle de câmera inicial (elevação/azimute), tema, grade, fundo, limites de eixos
+- Exportação nativa do Plotly (PNG, SVG, etc.)
 """
 import io
 from typing import List, Tuple, Optional
@@ -21,15 +20,10 @@ from typing import List, Tuple, Optional
 import streamlit as st
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
 
-# Força backend sem display (necessário no Streamlit Cloud)
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-from matplotlib.colors import Normalize
-from matplotlib import cm
-
+# (O Matplotlib não é mais necessário para a renderização do gráfico principal)
 
 # -----------------------------
 # Utilidades
@@ -58,73 +52,36 @@ def ensure_min_columns(df: Optional[pd.DataFrame]) -> pd.DataFrame:
 def to_numeric_safe(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
+def degrees_to_plotly_camera(elev, azim, dist=1.75):
+    """Converte elevação/azimute (graus) para o vetor 'eye' do Plotly."""
+    elev_rad = np.radians(elev)
+    azim_rad = np.radians(azim)
+    
+    x = dist * np.cos(elev_rad) * np.cos(azim_rad)
+    y = dist * np.cos(elev_rad) * np.sin(azim_rad)
+    z = dist * np.sin(elev_rad)
+    
+    return dict(x=x, y=y, z=z)
 
-def make_facecolors(
-    df: pd.DataFrame,
-    y_order: List[str],
-    z_vals: np.ndarray,
-    color_mode: str,
-    base_color: str,
-    colormap_name: str,
-    series_palette_name: str,
-) -> List:
-    """Define as cores de cada barra conforme o modo de cor selecionado."""
-    colors = []
-
-    if color_mode == "Única":
-        colors = [base_color] * len(df)
-
-    elif color_mode == "Por série (Y)":
-        # Mapa discreto por categoria Y
-        cmap = cm.get_cmap(series_palette_name, len(y_order))
-        y_to_idx = {y: i for i, y in enumerate(y_order)}
-        for y in df["__Y__"]:
-            colors.append(cmap(y_to_idx[y]))
-
-    else:  # "Por altura (colormap)"
-        norm = Normalize(vmin=float(np.nanmin(z_vals)), vmax=float(np.nanmax(z_vals)))
-        cmap = cm.get_cmap(colormap_name)
-        for z in z_vals:
-            colors.append(cmap(norm(z)))
-
-    return colors
-
-
-def draw_error_segments(ax, segments: List[Tuple[float, float, float, float]], cap: float, color="black", lw=1.0):
-    """Desenha segmentos de erro (linha vertical com 'chapéu')."""
-    for (x, y, z0, z1) in segments:
-        # Haste vertical
-        ax.plot([x, x], [y, y], [z0, z1], color=color, linewidth=lw)
-        # Chapéu superior
-        ax.plot([x - cap, x + cap], [y, y], [z1, z1], color=color, linewidth=lw)
-        # Chapéu inferior
-        ax.plot([x - cap, x + cap], [y, y], [z0, z0], color=color, linewidth=lw)
-
-
-def render_3d_bars(
+def render_plotly_3d_bars(
     df: pd.DataFrame,
     x_col: str,
     y_col: str,
     z_col: str,
-    err_style: str = "Nenhum",   # Nenhum | Simétrico | Assimétrico
+    err_style: str = "Nenhum",
     err_col: Optional[str] = None,
     err_low_col: Optional[str] = None,
     err_high_col: Optional[str] = None,
     elev: float = 20.0,
     azim: float = -60.0,
-    bar_width: float = 0.6,
-    bar_depth: float = 0.6,
-    alpha: float = 0.95,
-    edge_on: bool = True,
-    edge_width: float = 0.6,
-    edge_color: str = "black",
-    color_mode: str = "Única",   # Única | Por série (Y) | Por altura (colormap)
+    alpha: float = 1.0,
+    color_mode: str = "Única",
     base_color: str = "#3182bd",
-    colormap_name: str = "viridis",
-    series_palette_name: str = "tab10",
+    colormap_name: str = "Viridis",
+    series_palette_name: str = "Plotly",
     show_values: bool = True,
     value_fmt: str = "{:.2f}",
-    value_offset: float = 0.02,
+    value_offset: float = 2.0,
     zmin: Optional[float] = None,
     zmax: Optional[float] = None,
     show_grid: bool = True,
@@ -137,125 +94,104 @@ def render_3d_bars(
     label_size: int = 12,
     tick_size: int = 10,
     title_size: int = 16,
-    cap_ratio: float = 0.6,  # largura do “chapéu” de erro em relação à largura da barra
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Desenha o gráfico 3D de barras e retorna (fig, ax).
-    O DataFrame pode ter X e Y categóricos. Z deve ser numérico.
-    """
+) -> go.Figure:
+    
     df = df.copy()
+    df[z_col] = to_numeric_safe(df[z_col])
+    df = df.dropna(subset=[x_col, y_col, z_col]).reset_index(drop=True)
 
-    # Ordena categorias X/Y na ordem de aparição
-    x_order = list(pd.unique(df[x_col]))
-    y_order = list(pd.unique(df[y_col]))
+    fig = go.Figure()
 
-    df["__X__"] = pd.Categorical(df[x_col], categories=x_order, ordered=True)
-    df["__Y__"] = pd.Categorical(df[y_col], categories=y_order, ordered=True)
-    df["__Z__"] = to_numeric_safe(df[z_col])
+    # Lógica de Cores
+    colors = None
+    if color_mode == "Única":
+        colors = base_color
+    elif color_mode == "Por altura (colormap)":
+        colors = df[z_col]
 
-    # Filtra linhas com Z válido
-    df = df[~df["__Z__"].isna()].reset_index(drop=True)
+    # Lógica de traços: um traço por série se a cor for por série, senão um traço só
+    if color_mode == "Por série (Y)":
+        y_order = list(pd.unique(df[y_col]))
+        color_map = px.colors.get_colorscale(series_palette_name) if hasattr(px.colors.sequential, series_palette_name) else px.colors.qualitative.Plotly
+        
+        for i, y_val in enumerate(y_order):
+            df_series = df[df[y_col] == y_val]
+            color_index = i % len(color_map)
+            
+            fig.add_trace(go.Bar3d(
+                x=df_series[x_col], y=df_series[y_col], z=df_series[z_col],
+                name=str(y_val),
+                marker=dict(color=color_map[color_index]),
+                opacity=alpha
+            ))
+    else:
+        fig.add_trace(go.Bar3d(
+            x=df[x_col], y=df[y_col], z=df[z_col],
+            name=z_col,
+            marker=dict(
+                color=colors,
+                colorscale=colormap_name if color_mode == "Por altura (colormap)" else None,
+                colorbar=dict(title=z_col) if color_mode == "Por altura (colormap)" else None,
+            ),
+            opacity=alpha
+        ))
 
-    # Coordenadas numéricas para as barras
-    xs = df["__X__"].cat.codes.to_numpy(dtype=float)
-    ys = df["__Y__"].cat.codes.to_numpy(dtype=float)
-    zs = np.zeros_like(xs, dtype=float)  # base das barras no plano z=0
-    dz = df["__Z__"].to_numpy(dtype=float)
+    # Adicionar Erros
+    if err_style != "Nenhum":
+        err_df = df.copy()
+        if err_style == "Simétrico" and err_col in err_df.columns:
+            e = to_numeric_safe(err_df[err_col])
+            err_df['z_low'] = err_df[z_col] - e
+            err_df['z_high'] = err_df[z_col] + e
+        elif err_style == "Assimétrico" and err_low_col in err_df.columns and err_high_col in err_df.columns:
+            low = to_numeric_safe(err_df[err_low_col])
+            high = to_numeric_safe(err_df[err_high_col])
+            err_df['z_low'] = err_df[z_col] - low
+            err_df['z_high'] = err_df[z_col] + high
+        
+        err_df.dropna(subset=['z_low', 'z_high'], inplace=True)
+        
+        for _, row in err_df.iterrows():
+            fig.add_trace(go.Scatter3d(
+                x=[row[x_col], row[x_col]], y=[row[y_col], row[y_col]], z=[row['z_low'], row['z_high']],
+                mode='lines', line=dict(color='black', width=3), showlegend=False
+            ))
 
-    dx = np.full_like(xs, fill_value=float(bar_width))
-    dy = np.full_like(xs, fill_value=float(bar_depth))
-
-    # Cores
-    facecolors = make_facecolors(df, y_order, dz, color_mode, base_color, colormap_name, series_palette_name)
-
-    # Figure/Axes
-    fig = plt.figure(figsize=(10, 7), dpi=150)
-    ax = fig.add_subplot(111, projection="3d")
-
-    # Fundo
-    fig.patch.set_facecolor(bg_color)
-    ax.xaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
-    ax.yaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
-    ax.zaxis.set_pane_color(matplotlib.colors.to_rgba(pane_color, 1.0))
-
-    # Barras
-    ax.bar3d(xs, ys, zs, dx, dy, dz, shade=True,
-             color=facecolors,
-             edgecolor=edge_color if edge_on else None,
-             linewidth=edge_width,
-             alpha=alpha)
-
-    # Rótulos/ticks
-    ax.set_title(title, fontsize=title_size, pad=12)
-    ax.set_xlabel(xlabel, fontsize=label_size, labelpad=10)
-    ax.set_ylabel(ylabel, fontsize=label_size, labelpad=10)
-    ax.set_zlabel(zlabel, fontsize=label_size, labelpad=10)
-
-    ax.set_xticks(range(len(x_order)))
-    ax.set_xticklabels(x_order, fontsize=tick_size, rotation=0, ha="center")
-    ax.set_yticks(range(len(y_order)))
-    ax.set_yticklabels(y_order, fontsize=tick_size, rotation=0, ha="center")
-
-    # Limites Z
-    if zmin is not None or zmax is not None:
-        current = ax.get_zlim()
-        z0 = zmin if zmin is not None else current[0]
-        z1 = zmax if zmax is not None else current[1]
-        if z0 == z1:
-            z1 = z0 + 1.0
-        ax.set_zlim(z0, z1)
-
-    # Grid
-    ax.grid(show_grid)
-
-    # Câmera
-    ax.view_init(elev=elev, azim=azim)
-
-    # Erros
-    segments = []
-    if err_style == "Simétrico" and err_col and (err_col in df.columns):
-        e = to_numeric_safe(df[err_col]).to_numpy(dtype=float)
-        for x, y, z, ee, w in zip(xs, ys, dz, e, dx):
-            if not np.isnan(ee):
-                z0, z1 = z - ee, z + ee
-                cap = (w * cap_ratio) / 2.0
-                segments.append((x + w/2.0, y + (bar_depth/2.0), z0, z1))
-
-    elif err_style == "Assimétrico" and (err_low_col in df.columns) and (err_high_col in df.columns):
-        low = to_numeric_safe(df[err_low_col]).to_numpy(dtype=float)
-        high = to_numeric_safe(df[err_high_col]).to_numpy(dtype=float)
-        for x, y, z, lo, hi, w in zip(xs, ys, dz, low, high, dx):
-            if not (np.isnan(lo) or np.isnan(hi)):
-                z0, z1 = z - lo, z + hi
-                cap = (w * cap_ratio) / 2.0
-                segments.append((x + w/2.0, y + (bar_depth/2.0), z0, z1))
-
-    if segments:
-        cap = (float(bar_width) * cap_ratio) / 2.0
-        draw_error_segments(ax, segments, cap=cap, color=edge_color, lw=max(1.0, edge_width))
-
-    # Valores no topo
+    # Adicionar Rótulos de Valores
     if show_values:
-        for x, y, z, w, d in zip(xs, ys, dz, dx, dy):
-            x_center = x + w/2.0
-            y_center = y + d/2.0
-            ax.text(x_center, y_center, z + value_offset, value_fmt.format(z),
-                    ha="center", va="bottom", fontsize=max(8, tick_size))
-
-    return fig, ax
+        fig.add_trace(go.Scatter3d(
+            x=df[x_col], y=df[y_col], z=df[z_col] + value_offset,
+            mode='text',
+            text=[value_fmt.format(val) for val in df[z_col]],
+            textfont=dict(size=tick_size, color='black'),
+            showlegend=False
+        ))
+        
+    # Layout e Configurações da Cena 3D
+    camera = degrees_to_plotly_camera(elev, azim)
+    
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=title_size)),
+        scene=dict(
+            xaxis=dict(title=xlabel, showgrid=show_grid, backgroundcolor=pane_color),
+            yaxis=dict(title=ylabel, showgrid=show_grid, backgroundcolor=pane_color),
+            zaxis=dict(title=zlabel, showgrid=show_grid, backgroundcolor=pane_color, range=[zmin, zmax]),
+            camera=dict(eye=camera)
+        ),
+        font=dict(size=label_size),
+        plot_bgcolor=bg_color,
+        paper_bgcolor=bg_color,
+        showlegend=True
+    )
+    
+    return fig
 
 
 def main():
-    st.set_page_config(page_title="Barras 3D Avançado", layout="wide")
+    st.set_page_config(page_title="Barras 3D Interativo", layout="wide")
     
-    # ===== CONTROLES MOVIDOS PARA A BARRA LATERAL =====
+    # --- Controles na Barra Lateral ---
     st.sidebar.title("⚙️ Controles")
-
-    # Mapeamento de colunas
-    st.sidebar.subheader("Mapeamento de Colunas")
-    
-    # Dados serão carregados na página principal, mas o mapeamento fica na sidebar
-    # para que os controles apareçam antes do gráfico.
     
     # Carregamento de dados
     st.sidebar.subheader("Dados")
@@ -266,182 +202,95 @@ def main():
     df = None
     if up:
         try:
-            if up.name.lower().endswith(".csv"):
-                df = pd.read_csv(up, sep=sep)
-            else:
-                df = pd.read_excel(up)
+            df = pd.read_csv(up, sep=sep) if up.name.lower().endswith(".csv") else pd.read_excel(up)
         except Exception as e:
             st.error(f"Falha ao ler arquivo: {e}")
-            df = None
-
     df = ensure_min_columns(df)
     
-    # Mapeamento
     cols = list(df.columns)
-    x_col = st.sidebar.selectbox("Coluna X (categoria ou número)", options=cols, index=0)
-    y_col = st.sidebar.selectbox("Coluna Y (categoria ou número)", options=cols, index=1 if len(cols) > 1 else 0)
+    st.sidebar.subheader("Mapeamento de Colunas")
+    x_col = st.sidebar.selectbox("Coluna X", options=cols, index=0)
+    y_col = st.sidebar.selectbox("Coluna Y", options=cols, index=1 if len(cols) > 1 else 0)
     z_col = st.sidebar.selectbox("Coluna Z (altura)", options=cols, index=2 if len(cols) > 2 else 0)
 
-    st.sidebar.markdown("---")
     st.sidebar.subheader("Erros (opcional)")
-    err_style = st.sidebar.radio("Tipo de erro", options=["Nenhum", "Simétrico", "Assimétrico"], horizontal=True, index=0)
-    err_col = err_low_col = err_high_col = None
+    err_style = st.sidebar.radio("Tipo de erro", ["Nenhum", "Simétrico", "Assimétrico"], horizontal=True)
     if err_style == "Simétrico":
-        err_col = st.sidebar.selectbox("Coluna de erro (±)", options=["—"] + cols, index=0)
-        if err_col == "—":
-            err_style = "Nenhum"
-            err_col = None
+        err_col = st.sidebar.selectbox("Coluna de erro (±)", ["—"] + cols)
+        if err_col == "—": err_style = "Nenhum"
     elif err_style == "Assimétrico":
-        err_low_col = st.sidebar.selectbox("Coluna de erro -", options=["—"] + cols, index=0)
-        err_high_col = st.sidebar.selectbox("Coluna de erro +", options=["—"] + cols, index=0)
-        if err_low_col == "—" or err_high_col == "—":
-            err_style = "Nenhum"
-            err_low_col = err_high_col = None
+        err_low_col = st.sidebar.selectbox("Coluna de erro -", ["—"] + cols)
+        err_high_col = st.sidebar.selectbox("Coluna de erro +", ["—"] + cols)
+        if err_low_col == "—" or err_high_col == "—": err_style = "Nenhum"
 
-    st.sidebar.markdown("---")
     st.sidebar.subheader("Cores e Aparência")
-    bar_width = st.sidebar.number_input("Largura (X) da barra", 0.05, 1.0, 0.6, step=0.05)
-    bar_depth = st.sidebar.number_input("Profundidade (Y) da barra", 0.05, 1.0, 0.6, step=0.05)
-    alpha = st.sidebar.slider("Transparência (alpha)", 0.1, 1.0, 0.95, step=0.05)
-    
-    edge_on = st.sidebar.checkbox("Mostrar borda", value=True)
-    edge_width = st.sidebar.number_input("Espessura da borda", 0.0, 5.0, 0.6, step=0.1)
-    edge_color = st.sidebar.color_picker("Cor da borda", value="#000000")
-    
-    color_mode = st.sidebar.selectbox("Modo de cor", ["Única", "Por série (Y)", "Por altura (colormap)"], index=0)
+    alpha = st.sidebar.slider("Transparência (alpha)", 0.1, 1.0, 1.0, 0.05)
+    color_mode = st.sidebar.selectbox("Modo de cor", ["Única", "Por série (Y)", "Por altura (colormap)"])
 
+    base_color, colormap_name, series_palette_name = "#3182bd", "Viridis", "Plotly"
     if color_mode == "Única":
         base_color = st.sidebar.color_picker("Cor base", value="#3182bd")
-    else:
-        base_color = "#3182bd"
-    
-    if color_mode == "Por altura (colormap)":
-        colormap_name = st.sidebar.selectbox("Colormap", sorted([m for m in plt.colormaps() if not str(m).endswith('_r')]), index=sorted([m for m in plt.colormaps() if not str(m).endswith('_r')]).index("viridis"))
-    else:
-        colormap_name = "viridis"
-        
-    if color_mode == "Por série (Y)":
-        series_palette_name = st.sidebar.selectbox("Paleta de séries", options=["tab10", "tab20", "Set3", "Pastel1", "Accent"], index=0)
-    else:
-        series_palette_name = "tab10"
+    elif color_mode == "Por altura (colormap)":
+        available_colormaps = ["Viridis", "Cividis", "Plasma", "Blues", "Reds", "Greens"]
+        colormap_name = st.sidebar.selectbox("Colormap", available_colormaps)
+    elif color_mode == "Por série (Y)":
+        available_palettes = ["Plotly", "T10", "G10", "D3", "Pastel"]
+        series_palette_name = st.sidebar.selectbox("Paleta de séries", available_palettes)
         
     show_values = st.sidebar.checkbox("Mostrar valores no topo", value=True)
     value_fmt = st.sidebar.text_input("Formato do valor", value="{:.2f}")
-    value_offset = st.sidebar.number_input("Offset em Z dos valores", 0.0, 1.0, 0.02, step=0.01)
+    value_offset = st.sidebar.number_input("Offset em Z dos valores", value=2.0, step=0.5)
 
-    st.sidebar.subheader("Rótulos, Limites e Câmera")
-    title = st.sidebar.text_input("Título", value="Gráfico de Barras 3D")
-    xlabel = st.sidebar.text_input("Rótulo eixo X", value="X")
-    ylabel = st.sidebar.text_input("Rótulo eixo Y", value="Y")
-    zlabel = st.sidebar.text_input("Rótulo eixo Z", value="Z")
+    st.sidebar.subheader("Rótulos, Limites e Câmera Inicial")
+    title = st.sidebar.text_input("Título", value="Gráfico de Barras 3D Interativo")
+    xlabel, ylabel, zlabel = st.sidebar.text_input("Rótulo X", "X"), st.sidebar.text_input("Rótulo Y", "Y"), st.sidebar.text_input("Rótulo Z", "Z")
     
-    label_size = st.sidebar.number_input("Tamanho rótulos (label)", 6, 30, 12, step=1)
-    tick_size = st.sidebar.number_input("Tamanho dos ticks", 6, 30, 10, step=1)
-    title_size = st.sidebar.number_input("Tamanho do título", 8, 40, 16, step=1)
-
-    elev = st.sidebar.slider("Elevação da câmera", -10, 90, 20, step=1)
-    azim = st.sidebar.slider("Azimute da câmera", -180, 180, -60, step=5)
+    title_size = st.sidebar.slider("Tamanho Título", 8, 40, 16)
+    label_size = st.sidebar.slider("Tamanho Rótulos", 6, 30, 12)
+    tick_size = st.sidebar.slider("Tamanho Ticks/Valores", 6, 30, 10)
+    
+    elev = st.sidebar.slider("Elevação da câmera", -90, 90, 20)
+    azim = st.sidebar.slider("Azimute da câmera", -180, 180, -45)
+    
     show_grid = st.sidebar.checkbox("Mostrar grade", value=True)
-
-    zmin = st.sidebar.number_input("Z mínimo (opcional)", value=0.0, step=1.0)
-    use_zmin = st.sidebar.checkbox("Fixar Zmín", value=False)
-    zmax = st.sidebar.number_input("Z máximo (opcional)", value=100.0, step=1.0)
-    use_zmax = st.sidebar.checkbox("Fixar Zmáx", value=False)
+    use_zmin = st.sidebar.checkbox("Fixar Z mín")
+    zmin = st.sidebar.number_input("Z mínimo", value=0.0, disabled=not use_zmin)
+    use_zmax = st.sidebar.checkbox("Fixar Z máx")
+    zmax = st.sidebar.number_input("Z máximo", value=100.0, disabled=not use_zmax)
     
-    bg_color = st.sidebar.color_picker("Cor de fundo da figura", value="#ffffff")
-    pane_color = st.sidebar.color_picker("Cor do plano 3D", value="#f5f5f5")
-    cap_ratio = st.sidebar.slider("Largura do 'chapéu' de erro (fração da barra)", 0.1, 1.0, 0.6, step=0.05)
+    bg_color = st.sidebar.color_picker("Cor de fundo", "#ffffff")
+    pane_color = st.sidebar.color_picker("Cor do plano 3D", "#f0f0f0")
 
-
-    # ===== ÁREA PRINCIPAL DA PÁGINA =====
-    st.title("📊 Barras 3D — Avançado (Matplotlib)")
-    with st.expander("ℹ️ Como usar", expanded=False):
-        st.markdown(
-            """
-            1) Use os controles na barra lateral à esquerda para carregar seus dados e customizar o gráfico.
-            2) O gráfico será atualizado automaticamente na área principal.
-            3) Exporte como PNG (com DPI) ou SVG.
-            """
-        )
-
+    # --- Área Principal da Página ---
+    st.title("📊 Barras 3D — Interativo (Plotly)")
+    
     if use_editor:
         st.write("Editor de Dados:")
         df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
     else:
         st.write("Prévia do DataFrame:")
         st.dataframe(df, use_container_width=True)
-
-    # Render
-    fig, ax = render_3d_bars(
-        df=df,
-        x_col=x_col,
-        y_col=y_col,
-        z_col=z_col,
-        err_style=err_style,
-        err_col=err_col if err_style == "Simétrico" else None,
-        err_low_col=err_low_col if err_style == "Assimétrico" else None,
-        err_high_col=err_high_col if err_style == "Assimétrico" else None,
-        elev=float(elev),
-        azim=float(azim),
-        bar_width=float(bar_width),
-        bar_depth=float(bar_depth),
-        alpha=float(alpha),
-        edge_on=bool(edge_on),
-        edge_width=float(edge_width),
-        edge_color=str(edge_color),
-        color_mode=str(color_mode),
-        base_color=str(base_color),
-        colormap_name=str(colormap_name),
-        series_palette_name=str(series_palette_name),
-        show_values=bool(show_values),
-        value_fmt=str(value_fmt),
-        value_offset=float(value_offset),
+    
+    # Renderizar o gráfico Plotly
+    fig = render_plotly_3d_bars(
+        df=df, x_col=x_col, y_col=y_col, z_col=z_col,
+        err_style=err_style, err_col=locals().get('err_col'),
+        err_low_col=locals().get('err_low_col'), err_high_col=locals().get('err_high_col'),
+        elev=float(elev), azim=float(azim), alpha=float(alpha),
+        color_mode=color_mode, base_color=base_color, colormap_name=colormap_name,
+        series_palette_name=series_palette_name, show_values=show_values,
+        value_fmt=value_fmt, value_offset=float(value_offset),
         zmin=float(zmin) if use_zmin else None,
         zmax=float(zmax) if use_zmax else None,
-        show_grid=bool(show_grid),
-        bg_color=str(bg_color),
-        pane_color=str(pane_color),
-        title=str(title),
-        xlabel=str(xlabel),
-        ylabel=str(ylabel),
-        zlabel=str(zlabel),
-        label_size=int(label_size),
-        tick_size=int(tick_size),
-        title_size=int(title_size),
-        cap_ratio=float(cap_ratio),
+        show_grid=show_grid, bg_color=bg_color, pane_color=pane_color,
+        title=title, xlabel=xlabel, ylabel=ylabel, zlabel=zlabel,
+        label_size=int(label_size), tick_size=int(tick_size), title_size=int(title_size)
     )
 
-    st.pyplot(fig, use_container_width=True)
-
-    # Exportação
-    with st.expander("💾 Exportar figura"):
-        ex1, ex2, ex3 = st.columns(3)
-        with ex1:
-            fmt = st.selectbox("Formato", options=["png", "svg"], index=0)
-        with ex2:
-            dpi = st.slider("DPI (apenas PNG)", 72, 600, 300, step=10)
-        with ex3:
-            file_name = st.text_input("Nome do arquivo (sem extensão)", value="barras3d")
-
-        b = io.BytesIO()
-        if fmt == "png":
-            fig.savefig(b, format="png", dpi=int(dpi), bbox_inches="tight", facecolor=fig.get_facecolor())
-            mime = "image/png"
-            ext = "png"
-        else:
-            fig.savefig(b, format="svg", bbox_inches="tight", facecolor=fig.get_facecolor())
-            mime = "image/svg+xml"
-            ext = "svg"
-        b.seek(0)
-        st.download_button(
-            label=f"⬇️ Baixar {ext.upper()}",
-            data=b,
-            file_name=f"{file_name}.{ext}",
-            mime=mime,
-            use_container_width=True
-        )
-
-    st.caption("Dica: no Streamlit Cloud, inclua no requirements.txt: streamlit, numpy, pandas, matplotlib.")
+    st.plotly_chart(fig, use_container_width=True, config={'displaylogo': False})
+    
+    st.caption("Passe o mouse sobre o gráfico para ver as opções de exportação (PNG, SVG, etc.).")
+    st.caption("Dica: no Streamlit Cloud, inclua no requirements.txt: streamlit, pandas, numpy, plotly.")
 
 if __name__ == "__main__":
     main()
