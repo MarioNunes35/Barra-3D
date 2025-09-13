@@ -25,8 +25,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 
-# (O restante das funções utilitárias como sample_dataframe, ensure_min_columns, etc., permanecem as mesmas)
-# ... [código das funções anteriores sem alteração] ...
+# -----------------------------
+# Utilidades
+# -----------------------------
 def sample_dataframe(n_x=4, n_y=4, seed=42) -> pd.DataFrame:
     """Cria dados de exemplo no formato LONGO: colunas X (cat), Y (cat), Z (valor), Err (simétrico)."""
     rng = np.random.default_rng(seed)
@@ -40,11 +41,13 @@ def sample_dataframe(n_x=4, n_y=4, seed=42) -> pd.DataFrame:
             data.append([x, y, z, e])
     return pd.DataFrame(data, columns=["X", "Y", "Z", "Err"])
 
+
 def ensure_min_columns(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     """Garante ao menos 3 colunas (X,Y,Z). Se não houver dados, usa exemplo."""
     if df is None or df.empty or df.shape[1] < 3:
         return sample_dataframe()
     return df
+
 
 def to_numeric_safe(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
@@ -77,18 +80,12 @@ def create_bar_outline_data(x_pos, y_pos, z_val, dx=0.8, dy=0.8):
         x_lines.extend([p1[0], p2[0], None]); y_lines.extend([p1[1], p2[1], None]); z_lines.extend([p1[2], p2[2], None])
     return x_lines, y_lines, z_lines
 
-def render_plotly_3d_bars(
-    df: pd.DataFrame,
-    x_col: str,
-    y_col: str,
-    z_col: str,
-    # ... (todos os outros parâmetros permanecem os mesmos)
-    **kwargs 
-) -> go.Figure:
-    
-    # Esta função continua a mesma, mas usamos **kwargs para manter a chamada limpa.
-    # O código interno não precisa de alterações.
+def render_plotly_3d_bars(df: pd.DataFrame, **kwargs) -> go.Figure:
     df = df.copy()
+    z_col = kwargs['z_col']
+    x_col = kwargs['x_col']
+    y_col = kwargs['y_col']
+    
     df[z_col] = to_numeric_safe(df[z_col])
     df = df.dropna(subset=[x_col, y_col, z_col]).reset_index(drop=True)
     fig = go.Figure()
@@ -167,7 +164,6 @@ def main():
     st.set_page_config(page_title="Barras 3D Interativo", layout="wide")
     st.sidebar.title("⚙️ Controles")
     
-    # --- Agrupar todos os parâmetros em um dicionário para facilitar a passagem ---
     params = {}
 
     st.sidebar.subheader("Dados")
@@ -235,12 +231,10 @@ def main():
     use_zmax = st.sidebar.checkbox("Fixar Z máx"); params['zmax'] = st.sidebar.number_input("Z máximo", value=100.0, disabled=not use_zmax) if use_zmax else None
     params['bg_color'] = st.sidebar.color_picker("Cor de fundo", "#ffffff"); params['pane_color'] = st.sidebar.color_picker("Cor do plano 3D", "#f0f0f0")
 
-    # --- NOVO: Seção de Exportação ---
     st.sidebar.subheader("Exportação de Alta Qualidade")
     export_format = st.sidebar.selectbox("Formato de Imagem", ["PNG", "JPEG", "SVG"])
     export_scale = st.sidebar.slider("Fator de Escala (Qualidade)", 1, 10, 6, help="Aumente para maior resolução. Um fator de 6x é aproximadamente 600 DPI.")
 
-    # --- Área Principal da Página ---
     st.title("📊 Barras 3D — Interativo (Plotly)")
     if use_editor:
         st.write("Editor de Dados:"); df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
@@ -250,14 +244,10 @@ def main():
     fig = render_plotly_3d_bars(df=df, **params)
     st.plotly_chart(fig, use_container_width=True, height=int(chart_height), config={'displaylogo': False})
     
-    # --- NOVO: Botão de Download ---
     st.write("---")
     st.subheader("Download do Gráfico")
     try:
-        # Gera a imagem em memória
-        img_bytes = fig.to_image(format=export_format.lower(), scale=export_scale)
-        
-        # Cria o botão de download
+        img_bytes = fig.to_image(format=export_format.lower(), scale=export_scale, width=1920, height=1080)
         st.download_button(
             label=f"Baixar como {export_format}",
             data=img_bytes,
@@ -266,8 +256,7 @@ def main():
         )
     except Exception as e:
         st.error(f"Falha ao gerar imagem para exportação: {e}")
-        st.info("Certifique-se de ter a biblioteca 'kaleido' instalada (`pip install kaleido`)")
-
+        st.info("Certifique-se de que a biblioteca 'kaleido' está no requirements.txt e o 'chromium' está no packages.txt.")
 
 if __name__ == "__main__":
     main()
