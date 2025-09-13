@@ -22,8 +22,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-
-# (O Matplotlib não é mais necessário para a renderização do gráfico principal)
+from plotly.graph_objs import Bar3d # <--- 1. IMPORTAÇÃO ADICIONADA AQUI
 
 # -----------------------------
 # Utilidades
@@ -118,14 +117,16 @@ def render_plotly_3d_bars(
             df_series = df[df[y_col] == y_val]
             color_index = i % len(color_map)
             
-            fig.add_trace(go.Bar3d(
+            # <--- 2. ALTERAÇÃO DE go.Bar3d PARA Bar3d
+            fig.add_trace(Bar3d(
                 x=df_series[x_col], y=df_series[y_col], z=df_series[z_col],
                 name=str(y_val),
                 marker=dict(color=color_map[color_index]),
                 opacity=alpha
             ))
     else:
-        fig.add_trace(go.Bar3d(
+        # <--- 2. ALTERAÇÃO DE go.Bar3d PARA Bar3d
+        fig.add_trace(Bar3d(
             x=df[x_col], y=df[y_col], z=df[z_col],
             name=z_col,
             marker=dict(
@@ -139,11 +140,11 @@ def render_plotly_3d_bars(
     # Adicionar Erros
     if err_style != "Nenhum":
         err_df = df.copy()
-        if err_style == "Simétrico" and err_col in err_df.columns:
+        if err_style == "Simétrico" and err_col and err_col in err_df.columns:
             e = to_numeric_safe(err_df[err_col])
             err_df['z_low'] = err_df[z_col] - e
             err_df['z_high'] = err_df[z_col] + e
-        elif err_style == "Assimétrico" and err_low_col in err_df.columns and err_high_col in err_df.columns:
+        elif err_style == "Assimétrico" and err_low_col and err_high_col and err_low_col in err_df.columns and err_high_col in err_df.columns:
             low = to_numeric_safe(err_df[err_low_col])
             high = to_numeric_safe(err_df[err_high_col])
             err_df['z_low'] = err_df[z_col] - low
@@ -215,6 +216,7 @@ def main():
 
     st.sidebar.subheader("Erros (opcional)")
     err_style = st.sidebar.radio("Tipo de erro", ["Nenhum", "Simétrico", "Assimétrico"], horizontal=True)
+    err_col, err_low_col, err_high_col = None, None, None
     if err_style == "Simétrico":
         err_col = st.sidebar.selectbox("Coluna de erro (±)", ["—"] + cols)
         if err_col == "—": err_style = "Nenhum"
@@ -274,8 +276,8 @@ def main():
     # Renderizar o gráfico Plotly
     fig = render_plotly_3d_bars(
         df=df, x_col=x_col, y_col=y_col, z_col=z_col,
-        err_style=err_style, err_col=locals().get('err_col'),
-        err_low_col=locals().get('err_low_col'), err_high_col=locals().get('err_high_col'),
+        err_style=err_style, err_col=err_col,
+        err_low_col=err_low_col, err_high_col=err_high_col,
         elev=float(elev), azim=float(azim), alpha=float(alpha),
         color_mode=color_mode, base_color=base_color, colormap_name=colormap_name,
         series_palette_name=series_palette_name, show_values=show_values,
