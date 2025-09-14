@@ -487,9 +487,9 @@ def main():
     if resolution_preset == "Custom":
         c1, c2 = st.sidebar.columns(2)
         with c1:
-            export_width = st.number_input("L (px)", 1920, 100, 10000)
+            export_width = st.number_input("L (px)", min_value=100, max_value=10000, value=1920)
         with c2:
-            export_height = st.number_input("A (px)", 1080, 100, 10000)
+            export_height = st.number_input("A (px)", min_value=100, max_value=10000, value=1080)
     else:
         export_width, export_height = RESOLUTION_PRESETS[resolution_preset]
         st.sidebar.info(f"📐 {export_width}x{export_height}px")
