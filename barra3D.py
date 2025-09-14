@@ -456,11 +456,14 @@ def main():
         
         c1, c2, c3 = st.columns(3)
         with c1:
-            params['title_size'] = st.number_input("Tít", 16, 8, 40)
+            # FIX: Corrigido usando argumentos nomeados para garantir a ordem correta.
+            params['title_size'] = st.number_input("Tít", min_value=8, max_value=40, value=16)
         with c2:
-            params['label_size'] = st.number_input("Eix", 12, 6, 30)
+            # FIX: Corrigido usando argumentos nomeados para garantir a ordem correta.
+            params['label_size'] = st.number_input("Eix", min_value=6, max_value=30, value=12)
         with c3:
-            params['tick_size'] = st.number_input("Val", 10, 6, 30)
+            # FIX: Corrigido usando argumentos nomeados para garantir a ordem correta.
+            params['tick_size'] = st.number_input("Val", min_value=6, max_value=30, value=10)
     
     # ===== SEÇÃO: LAYOUT =====
     with st.sidebar.expander("🎯 Visual"):
