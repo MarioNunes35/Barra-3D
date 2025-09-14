@@ -1,608 +1,560 @@
-# -*- coding: utf-8 -*-
-"""
-Streamlit – 3D Bar Chart (Enhanced Export Version)
-Author: Enhanced Version
-Date: 2025-09-14
-
-Melhorias principais:
-- Área de visualização expandida e responsiva
-- Exportação em alta resolução com múltiplas opções
-- Controles avançados de qualidade de exportação
-- Suporte para diferentes aspectos e resoluções predefinidas
-"""
+# barra3D.py — Streamlit + Plotly 3D Bars (client-side export, advanced customization, multi-file input)
+# Autor: ChatGPT (GPT-5 Thinking)
+# Execução: streamlit run barra3D.py
 
 import io
 import base64
-from typing import Optional, List, Tuple
-import streamlit as st
+import uuid
+from typing import Optional, Tuple, List
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
+import streamlit as st
+import streamlit.components.v1 as components
 
-# -----------------------------
-# Configuração da Página
-# -----------------------------
-st.set_page_config(
-    page_title="Barras 3D Interativo - HD Export",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Barras 3D (custom avançado / sem Kaleido)", layout="wide", initial_sidebar_state="expanded")
 
-# CSS customizado para maximizar área de visualização
-st.markdown("""
-    <style>
-    .main > div {
-        padding-top: 1rem;
-        padding-bottom: 1rem;
-    }
-    .block-container {
-        padding-top: 1rem;
-        padding-bottom: 1rem;
-        max-width: 100%;
-    }
-    [data-testid="stSidebar"] {
-        min-width: 250px;
-        max-width: 350px;
-    }
-    .stPlotlyChart {
-        height: 100%;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# ======================================
+# Utilitário: botão de download client-side (sem Kaleido)
+# ======================================
+def plotly_download_button(fig, filename="grafico.png", fmt="png", width=1600, height=900, scale=2):
+    """
+    Baixa a figura Plotly no navegador via Plotly.downloadImage (sem Kaleido).
+    Formatos: 'png', 'jpeg', 'webp', 'svg'. width/height em px; scale (1–4).
+    """
+    fig_json = fig.to_json()
+    fig_b64 = base64.b64encode(fig_json.encode("utf-8")).decode("ascii")
+    uid = "pldl_" + uuid.uuid4().hex
 
-# -----------------------------
-# Utilidades
-# -----------------------------
-def sample_dataframe(n_x=4, n_y=4, seed=42) -> pd.DataFrame:
-    """Cria dados de exemplo no formato LONGO."""
-    rng = np.random.default_rng(seed)
-    xs = [f"Grupo {i+1}" for i in range(n_x)]
-    ys = [f"Série {j+1}" for j in range(n_y)]
-    data = []
-    for x in xs:
-        for y in ys:
-            z = float(rng.uniform(10, 100))
-            e = float(rng.uniform(1, 10))
-            data.append([x, y, z, e])
-    return pd.DataFrame(data, columns=["X", "Y", "Z", "Err"])
+    html = f"""
+    <div id="{uid}" style="position:absolute; left:-10000px; top:0; width:{width}px; height:{height}px;"></div>
+    <button id="{uid}_btn" style="padding:0.5rem 0.75rem; border-radius:8px; border:1px solid #ccc; cursor:pointer;">
+      ⬇️ Baixar {filename}
+    </button>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <script>
+    (function(){{
+        const uid = "{uid}";
+        const container = document.getElementById(uid);
+        const btn = document.getElementById(uid + "_btn");
+        const fig = JSON.parse(atob("{fig_b64}"));
+        Plotly.newPlot(container, fig.data, fig.layout, {{displayModeBar:false, responsive:true}}).then(() => {{
+            btn.onclick = function(){{
+                Plotly.downloadImage(container, {{
+                    format: "{fmt}",
+                    filename: "{filename.rsplit('.', 1)[0]}",
+                    width: {width},
+                    height: {height},
+                    scale: {scale}
+                }});
+            }};
+        }});
+    }})();
+    </script>
+    """
+    components.html(html, height=60)
 
-def ensure_min_columns(df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """Garante ao menos 3 colunas (X,Y,Z)."""
-    if df is None or df.empty or df.shape[1] < 3:
-        return sample_dataframe()
-    return df
+# ======================================
+# Geometria das barras (Mesh3d)
+# ======================================
+def cuboid_vertices(x0, y0, z0, dx, dy, dz):
+    return np.array([
+        [x0,     y0,     z0    ],
+        [x0+dx,  y0,     z0    ],
+        [x0+dx,  y0+dy,  z0    ],
+        [x0,     y0+dy,  z0    ],
+        [x0,     y0,     z0+dz ],
+        [x0+dx,  y0,     z0+dz ],
+        [x0+dx,  y0+dy,  z0+dz ],
+        [x0,     y0+dy,  z0+dz ],
+    ], dtype=float)
 
-def to_numeric_safe(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce")
+CUBOID_FACES = np.array([
+    [0,1,2],[0,2,3],
+    [4,5,6],[4,6,7],
+    [0,1,5],[0,5,4],
+    [1,2,6],[1,6,5],
+    [2,3,7],[2,7,6],
+    [3,0,4],[3,4,7],
+], dtype=int)
 
-def degrees_to_plotly_camera(elev, azim, dist=1.75):
-    """Converte elevação/azimute para o vetor 'eye' do Plotly."""
-    elev_rad = np.radians(elev)
-    azim_rad = np.radians(azim)
-    x = dist * np.cos(elev_rad) * np.cos(azim_rad)
-    y = dist * np.cos(elev_rad) * np.sin(azim_rad)
-    z = dist * np.sin(elev_rad)
-    return dict(x=x, y=y, z=z)
+def make_bars_mesh(Z, sx=1.0, sy=1.0, bx=0.7, by=0.7, base_z=0.0):
+    rows, cols = Z.shape
+    half_dx = (bx * sx) / 2.0
+    half_dy = (by * sy) / 2.0
 
-def create_bar_mesh_data(x_pos, y_pos, z_val, dx=0.8, dy=0.8):
-    """Cria os vértices e faces para uma barra 3D."""
-    x_verts = [x_pos - dx/2, x_pos + dx/2, x_pos + dx/2, x_pos - dx/2, 
-               x_pos - dx/2, x_pos + dx/2, x_pos + dx/2, x_pos - dx/2]
-    y_verts = [y_pos - dy/2, y_pos - dy/2, y_pos + dy/2, y_pos + dy/2,
-               y_pos - dy/2, y_pos - dy/2, y_pos + dy/2, y_pos + dy/2]
-    z_verts = [0, 0, 0, 0, z_val, z_val, z_val, z_val]
-    i = [7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2]
-    j = [3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3]
-    k = [0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6]
-    return x_verts, y_verts, z_verts, i, j, k
+    vertices = []
+    intensities = []
+    faces_i = []
+    faces_j = []
+    faces_k = []
+    idx_offset = 0
 
-def create_bar_outline_data(x_pos, y_pos, z_val, dx=0.8, dy=0.8):
-    """Cria os segmentos de linha para o contorno de uma barra."""
-    x0, x1 = x_pos - dx/2, x_pos + dx/2
-    y0, y1 = y_pos - dy/2, y_pos + dy/2
-    z0, z1 = 0, z_val
-    
-    verts = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
-             (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
-    edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
-             (0, 4), (1, 5), (2, 6), (3, 7)]
-    
+    centers = []  # para labels
+    for r in range(rows):
+        for c in range(cols):
+            z = float(Z[r, c])
+            cx = c * sx
+            cy = r * sy
+            x0 = cx - half_dx
+            y0 = cy - half_dy
+            z0 = base_z
+            dx = bx * sx
+            dy = by * sy
+            dz = max(0.0, z - base_z)
+
+            V = cuboid_vertices(x0, y0, z0, dx, dy, dz)
+            vertices.append(V)
+            intensities.append(np.full(8, z, dtype=float))
+
+            faces = CUBOID_FACES + idx_offset
+            faces_i.extend(faces[:,0])
+            faces_j.extend(faces[:,1])
+            faces_k.extend(faces[:,2])
+            idx_offset += 8
+
+            centers.append((cx, cy, base_z + dz))
+
+    if not vertices:
+        return [], [], [], [], [], [], [], []
+
+    V_all = np.vstack(vertices)
+    intensity_all = np.concatenate(intensities)
+    x, y, z = V_all[:,0], V_all[:,1], V_all[:,2]
+    return x, y, z, np.array(faces_i), np.array(faces_j), np.array(faces_k), intensity_all, np.array(centers)
+
+def make_edges_traces(Z, sx=1.0, sy=1.0, bx=0.7, by=0.7, base_z=0.0, line_width=1.0, line_color="black"):
+    rows, cols = Z.shape
+    half_dx = (bx * sx) / 2.0
+    half_dy = (by * sy) / 2.0
+
     x_lines, y_lines, z_lines = [], [], []
-    for p1_idx, p2_idx in edges:
-        p1, p2 = verts[p1_idx], verts[p2_idx]
-        x_lines.extend([p1[0], p2[0], None])
-        y_lines.extend([p1[1], p2[1], None])
-        z_lines.extend([p1[2], p2[2], None])
-    return x_lines, y_lines, z_lines
+    edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
 
-# -----------------------------
-# Presets de Resolução
-# -----------------------------
-RESOLUTION_PRESETS = {
-    "HD (1280x720)": (1280, 720),
-    "Full HD (1920x1080)": (1920, 1080),
+    for r in range(rows):
+        for c in range(cols):
+            z = float(Z[r, c])
+            cx, cy = c * sx, r * sy
+            x0, y0, z0 = cx - half_dx, cy - half_dy, base_z
+            dx, dy, dz = bx * sx, by * sy, max(0.0, z - base_z)
+            verts = cuboid_vertices(x0, y0, z0, dx, dy, dz)
+
+            for a, b in edges:
+                p1, p2 = verts[a], verts[b]
+                x_lines += [p1[0], p2[0], None]
+                y_lines += [p1[1], p2[1], None]
+                z_lines += [p1[2], p2[2], None]
+
+    if not x_lines:
+        return None
+
+    return go.Scatter3d(
+        x=x_lines, y=y_lines, z=z_lines,
+        mode="lines",
+        line=dict(width=line_width, color=line_color),
+        hoverinfo="skip",
+        name="Bordas"
+    )
+
+# ======================================
+# Helpers de câmera e parsing de arquivos
+# ======================================
+def get_camera_eye(mode, custom=(1.5,1.8,1.2)):
+    if mode == "frente":
+        return dict(x=0.1, y=2.0, z=1.5)
+    if mode == "lado":
+        return dict(x=2.0, y=0.1, z=1.5)
+    if mode == "topo":
+        return dict(x=0.1, y=0.1, z=3.0)
+    if mode == "custom":
+        cx, cy, cz = custom
+        return dict(x=float(cx), y=float(cy), z=float(cz))
+    return dict(x=1.5, y=1.8, z=1.2)  # isométrica
+
+def read_table_any(file, mode_hint="auto", delimiter="auto", decimal=".", sheet=None) -> Tuple[Optional[pd.DataFrame], str]:
+    name = file.name.lower()
+    try:
+        if name.endswith((".xlsx", ".xls")):
+            if name.endswith(".xlsx"):
+                df = pd.read_excel(file, sheet_name=sheet or 0, engine="openpyxl")
+            else:
+                df = pd.read_excel(file, sheet_name=sheet or 0)  # xlrd para .xls (suportado)
+            return df, ""
+        else:
+            # texto: tentar detectar separador
+            if delimiter == "auto":
+                # Tentativas comuns
+                for sep in [",", ";", "\t", "|"]:
+                    try:
+                        df = pd.read_csv(file, sep=sep, decimal=decimal)
+                        if df.shape[1] >= 2:
+                            return df, ""
+                    except Exception:
+                        continue
+                # Último recurso: whitespace
+                file.seek(0)
+                df = pd.read_csv(file, sep=r"\s+", engine="python", decimal=decimal)
+                return df, ""
+            else:
+                df = pd.read_csv(file, sep=delimiter, decimal=decimal)
+                return df, ""
+    except Exception as e:
+        return None, f"Erro ao ler arquivo: {e}"
+
+def grid_from_triplet(df, col_x, col_y, col_z) -> np.ndarray:
+    d = df[[col_x, col_y, col_z]].rename(columns={col_x:"x", col_y:"y", col_z:"z"})
+    xs = np.sort(d["x"].unique())
+    ys = np.sort(d["y"].unique())
+    X, Y = np.meshgrid(xs, ys)
+    Z = np.full_like(X, fill_value=0.0, dtype=float)
+    for _, row in d.iterrows():
+        xi = np.where(xs == row["x"])[0][0]
+        yi = np.where(ys == row["y"])[0][0]
+        Z[yi, xi] = float(row["z"])
+    return Z
+
+def grid_from_indices(df, col_i, col_j, col_val) -> np.ndarray:
+    d = df[[col_i, col_j, col_val]].rename(columns={col_i:"i", col_j:"j", col_val:"value"})
+    r = int(d["i"].max())+1
+    c = int(d["j"].max())+1
+    Z = np.zeros((r, c), dtype=float)
+    for _, row in d.iterrows():
+        Z[int(row["i"]), int(row["j"])] = float(row["value"])
+    return Z
+
+def grid_from_matrix(df, first_row_as_x=True, first_col_as_y=True) -> np.ndarray:
+    temp = df.copy()
+    if first_row_as_x:
+        temp.columns = temp.iloc[0].values
+        temp = temp.iloc[1:]
+    if first_col_as_y:
+        temp.index = temp.iloc[:,0].values
+        temp = temp.iloc[:,1:]
+    # agora o restante deve ser valores numéricos
+    temp = temp.apply(pd.to_numeric, errors="coerce")
+    temp = temp.fillna(0.0)
+    return temp.values.astype(float)
+
+# ======================================
+# Sidebar — Dados & Parsing
+# ======================================
+st.sidebar.title("🎛️ Controles")
+
+data_source = st.sidebar.radio("Origem dos dados", ["Aleatório", "Arquivo"], index=0, horizontal=True)
+uploaded = None
+df_preview = None
+warn = ""
+
+if data_source == "Arquivo":
+    file = st.sidebar.file_uploader("Anexar: CSV, TXT, TSV, XLSX, XLS", type=["csv","txt","tsv","xlsx","xls"], accept_multiple_files=False)
+    if file is not None:
+        with st.sidebar.expander("⚙️ Leitura do arquivo", expanded=False):
+            delimiter = st.selectbox("Separador", ["auto", ",", ";", "\\t", "|"], index=0)
+            if delimiter == "\\t":
+                delimiter = "\t"
+            decimal = st.selectbox("Decimal", [".", ","], index=0)
+            sheet = None
+            if file.name.lower().endswith((".xlsx",".xls")):
+                try:
+                    xls = pd.ExcelFile(file)
+                    sheet = st.selectbox("Planilha (Excel)", xls.sheet_names, index=0)
+                    file.seek(0)
+                except Exception as e:
+                    st.warning(f"Não foi possível listar planilhas: {e}")
+                    sheet = None
+
+        df_preview, warn = read_table_any(file, delimiter=delimiter, decimal=decimal, sheet=sheet)
+        if warn:
+            st.sidebar.error(warn)
+        else:
+            st.sidebar.success(f"Arquivo lido: {df_preview.shape[0]} linhas × {df_preview.shape[1]} colunas")
+            st.sidebar.caption("Ajuste o mapeamento de colunas em “Formato dos dados”.")
+
+# ======================================
+# Sidebar — Formato dos Dados
+# ======================================
+format_mode = st.sidebar.selectbox("Formato dos dados", ["Triplet (x,y,z)", "Índices (i,j,value)", "Matriz (linhas × colunas)"], index=0, help="Escolha como seu arquivo representa os dados 3D.")
+
+if data_source == "Aleatório":
+    rows = st.sidebar.slider("Linhas (rows)", 1, 50, 6)
+    cols = st.sidebar.slider("Colunas (cols)", 1, 50, 6)
+    z_min = st.sidebar.slider("Altura mínima (rand)", 0.0, 10.0, 1.0, 0.1)
+    z_max = st.sidebar.slider("Altura máxima (rand)", 0.0, 50.0, 6.0, 0.1)
+    seed = st.sidebar.number_input("Random seed", min_value=0, max_value=10_000, value=42, step=1)
+else:
+    rows = cols = None
+    z_min = z_max = seed = None
+
+# Mapeamento de colunas quando há arquivo
+col_x = col_y = col_z = col_i = col_j = col_val = None
+mat_first_row = mat_first_col = True
+
+if data_source == "Arquivo" and df_preview is not None:
+    with st.sidebar.expander("🧭 Mapeamento de colunas", expanded=True):
+        cols_list = list(df_preview.columns)
+        if format_mode.startswith("Triplet"):
+            col_x = st.selectbox("Coluna X", cols_list, index=min(0, len(cols_list)-1))
+            col_y = st.selectbox("Coluna Y", cols_list, index=min(1, len(cols_list)-1))
+            col_z = st.selectbox("Coluna Z (valor)", cols_list, index=min(2, len(cols_list)-1))
+        elif format_mode.startswith("Índices"):
+            col_i = st.selectbox("Coluna i (linha)", cols_list, index=min(0, len(cols_list)-1))
+            col_j = st.selectbox("Coluna j (coluna)", cols_list, index=min(1, len(cols_list)-1))
+            col_val = st.selectbox("Coluna valor", cols_list, index=min(2, len(cols_list)-1))
+        else:
+            mat_first_row = st.checkbox("Primeira linha é cabeçalho (X)", True)
+            mat_first_col = st.checkbox("Primeira coluna é rótulo de linhas (Y)", True)
+
+# ======================================
+# Sidebar — Geometria / Estilo / Cores
+# ======================================
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧱 Geometria das Barras")
+spacing_x = st.sidebar.slider("Espaçamento X (sx)", 0.1, 5.0, 1.0, 0.1)
+spacing_y = st.sidebar.slider("Espaçamento Y (sy)", 0.1, 5.0, 1.0, 0.1)
+bar_size_x = st.sidebar.slider("Largura barra X (bx)", 0.05, 1.0, 0.7, 0.05)
+bar_size_y = st.sidebar.slider("Largura barra Y (by)", 0.05, 1.0, 0.7, 0.05)
+opacity = st.sidebar.slider("Opacidade", 0.1, 1.0, 0.95, 0.05)
+
+st.sidebar.subheader("🎨 Cores")
+colorscale = st.sidebar.selectbox("Escala de cores", ["Viridis","Plasma","Inferno","Magma","Cividis","Turbo","IceFire","Sunset","Jet"], index=0)
+reverse_colors = st.sidebar.checkbox("Inverter escala", False)
+show_colorbar = st.sidebar.checkbox("Mostrar barra de cores", True)
+cmin_en = st.sidebar.checkbox("Fixar cmin/cmax", False)
+cmin_val = cmax_val = None
+if cmin_en:
+    cmin_val = st.sidebar.number_input("cmin", value=0.0, step=0.1)
+    cmax_val = st.sidebar.number_input("cmax", value=10.0, step=0.1)
+
+st.sidebar.subheader("💡 Iluminação")
+ambient = st.sidebar.slider("ambient", 0.0, 1.0, 0.5, 0.05)
+diffuse = st.sidebar.slider("diffuse", 0.0, 1.0, 0.6, 0.05)
+specular = st.sidebar.slider("specular", 0.0, 1.0, 0.2, 0.05)
+
+st.sidebar.subheader("🧵 Bordas")
+show_edges = st.sidebar.checkbox("Mostrar bordas", True)
+edge_width = st.sidebar.slider("Espessura da borda", 0.5, 6.0, 1.2, 0.1)
+edge_color = st.sidebar.color_picker("Cor da borda", "#000000")
+
+# ======================================
+# Sidebar — Layout / Câmera / Eixos
+# ======================================
+st.sidebar.markdown("---")
+st.sidebar.subheader("🗺️ Layout")
+template = st.sidebar.selectbox("Tema (Plotly)", ["plotly_white","plotly","plotly_dark","ggplot2","seaborn","simple_white","none"], index=0)
+title_text = st.sidebar.text_input("Título do gráfico", "Gráfico de Coluna 3D")
+title_size = st.sidebar.slider("Tamanho do título", 10, 48, 20)
+label_size = st.sidebar.slider("Tamanho rótulos (eixos)", 8, 36, 14)
+tick_size = st.sidebar.slider("Tamanho ticks", 8, 36, 12)
+
+x_label = st.sidebar.text_input("Eixo X", "X")
+y_label = st.sidebar.text_input("Eixo Y", "Y")
+z_label = st.sidebar.text_input("Eixo Z", "Z")
+
+scene_bg = st.sidebar.color_picker("Cor de fundo da cena", "#ffffff")
+axis_bg_on = st.sidebar.checkbox("Mostrar fundo dos eixos", False)
+axis_bg_color = st.sidebar.color_picker("Cor do fundo dos eixos", "#E5ECF6")
+
+grid_on = st.sidebar.checkbox("Mostrar grid", False)
+grid_color = st.sidebar.color_picker("Cor da grid", "#CCCCCC")
+
+camera_view = st.sidebar.selectbox("Câmera", ["isométrica","frente","lado","topo","custom"], index=0)
+cam_x = st.sidebar.number_input("camera.x", value=1.5, step=0.1)
+cam_y = st.sidebar.number_input("camera.y", value=1.8, step=0.1)
+cam_z = st.sidebar.number_input("camera.z", value=1.2, step=0.1)
+
+aspect_mode = st.sidebar.selectbox("Aspecto", ["data","cube","manual"], index=0)
+ar_x = st.sidebar.number_input("aspect.x", value=1.0, step=0.1)
+ar_y = st.sidebar.number_input("aspect.y", value=1.0, step=0.1)
+ar_z = st.sidebar.number_input("aspect.z", value=0.7, step=0.1)
+
+manual_range = st.sidebar.checkbox("Fixar faixa dos eixos", False)
+x_min = st.sidebar.number_input("x_min", value=0.0)
+x_max = st.sidebar.number_input("x_max", value=10.0)
+y_min = st.sidebar.number_input("y_min", value=0.0)
+y_max = st.sidebar.number_input("y_max", value=10.0)
+z_min_fixed = st.sidebar.number_input("z_min (axis)", value=0.0)
+z_max_fixed = st.sidebar.number_input("z_max (axis)", value=10.0)
+
+st.sidebar.subheader("📝 Rótulos numéricos")
+show_value_labels = st.sidebar.checkbox("Exibir valores no topo", False)
+label_decimals = st.sidebar.slider("Casas decimais", 0, 6, 2)
+label_font_size = st.sidebar.slider("Tamanho dos rótulos", 8, 30, 12)
+
+# ======================================
+# Sidebar — Exportação (sem Kaleido)
+# ======================================
+st.sidebar.markdown("---")
+st.sidebar.subheader("📤 Exportação (no navegador)")
+fmt = st.sidebar.selectbox("Formato", ["PNG","JPEG","WEBP","SVG"], index=0)
+preset = st.sidebar.selectbox("Resolução", ["1080p (1920x1080)","2K (2560x1440)","4K (3840x2160)","8K (7680x4320)","Custom"], index=2)
+presets = {
+    "1080p (1920x1080)": (1920, 1080),
     "2K (2560x1440)": (2560, 1440),
     "4K (3840x2160)": (3840, 2160),
-    "Square (2000x2000)": (2000, 2000),
-    "Portrait (1080x1920)": (1080, 1920),
-    "Wide (2560x1080)": (2560, 1080),
-    "Custom": None
+    "8K (7680x4320)": (7680, 4320),
 }
+if preset != "Custom":
+    export_w, export_h = presets[preset]
+else:
+    export_w = st.sidebar.number_input("Largura (px)", 800, 16000, 3840, 10)
+    export_h = st.sidebar.number_input("Altura (px)", 600, 16000, 2160, 10)
+export_scale = st.sidebar.slider("Escala (1–4)", 1.0, 4.0, 2.0, 0.5)
 
-DPI_PRESETS = {
-    "Web (72 DPI)": 1,
-    "Screen (96 DPI)": 1.33,
-    "Print Low (150 DPI)": 2.08,
-    "Print Medium (300 DPI)": 4.17,
-    "Print High (600 DPI)": 8.33,
-}
-
-# -----------------------------
-# Função Principal de Renderização
-# -----------------------------
-def render_plotly_3d_bars(df: pd.DataFrame, **kwargs) -> go.Figure:
-    df = df.copy()
-    z_col = kwargs['z_col']
-    x_col = kwargs['x_col']
-    y_col = kwargs['y_col']
-    
-    df[z_col] = to_numeric_safe(df[z_col])
-    df = df.dropna(subset=[x_col, y_col, z_col]).reset_index(drop=True)
-    
-    fig = go.Figure()
-    
-    x_cats = pd.unique(df[x_col])
-    y_cats = pd.unique(df[y_col])
-    x_map = {cat: i for i, cat in enumerate(x_cats)}
-    y_map = {cat: i for i, cat in enumerate(y_cats)}
-    df['_x_num'] = df[x_col].map(x_map)
-    df['_y_num'] = df[y_col].map(y_map)
-    
-    bar_thickness = kwargs.get('bar_thickness', 0.8)
-
-    # Renderização das barras baseada no modo de cor
-    if kwargs['color_mode'] == "Por série (Y)":
-        color_map = getattr(px.colors.qualitative, kwargs['series_palette_name'], px.colors.qualitative.Plotly)
-        for i, y_val in enumerate(y_cats):
-            df_series = df[df[y_col] == y_val]
-            color = color_map[i % len(color_map)]
-            mesh_x, mesh_y, mesh_z, mesh_i, mesh_j, mesh_k = [], [], [], [], [], []
-            base_index = 0
-            
-            for _, row in df_series.iterrows():
-                x_v, y_v, z_v, i_v, j_v, k_v = create_bar_mesh_data(
-                    row['_x_num'], row['_y_num'], row[z_col], 
-                    dx=bar_thickness, dy=bar_thickness
-                )
-                mesh_x.extend(x_v)
-                mesh_y.extend(y_v)
-                mesh_z.extend(z_v)
-                mesh_i.extend([idx + base_index for idx in i_v])
-                mesh_j.extend([idx + base_index for idx in j_v])
-                mesh_k.extend([idx + base_index for idx in k_v])
-                base_index += 8
-            
-            fig.add_trace(go.Mesh3d(
-                x=mesh_x, y=mesh_y, z=mesh_z,
-                i=mesh_i, j=mesh_j, k=mesh_k,
-                color=color, opacity=kwargs['alpha'],
-                name=str(y_val)
-            ))
+# ======================================
+# Construção do Z
+# ======================================
+if data_source == "Aleatório":
+    rng = np.random.default_rng(seed or 0)
+    Z = rng.uniform(z_min, z_max, size=(rows, cols))
+else:
+    if df_preview is None:
+        st.error("Envie um arquivo e defina o mapeamento.")
+        st.stop()
+    if format_mode.startswith("Triplet"):
+        Z = grid_from_triplet(df_preview, col_x, col_y, col_z)
+    elif format_mode.startswith("Índices"):
+        Z = grid_from_indices(df_preview, col_i, col_j, col_val)
     else:
-        mesh_x, mesh_y, mesh_z, mesh_i, mesh_j, mesh_k, intensities = [], [], [], [], [], [], []
-        base_index = 0
-        
-        for _, row in df.iterrows():
-            x_v, y_v, z_v, i_v, j_v, k_v = create_bar_mesh_data(
-                row['_x_num'], row['_y_num'], row[z_col],
-                dx=bar_thickness, dy=bar_thickness
-            )
-            mesh_x.extend(x_v)
-            mesh_y.extend(y_v)
-            mesh_z.extend(z_v)
-            mesh_i.extend([idx + base_index for idx in i_v])
-            mesh_j.extend([idx + base_index for idx in j_v])
-            mesh_k.extend([idx + base_index for idx in k_v])
-            base_index += 8
-            
-            if kwargs['color_mode'] == "Por altura (colormap)":
-                intensities.extend([row[z_col]] * 8)
-        
-        trace_params = {
-            'x': mesh_x, 'y': mesh_y, 'z': mesh_z,
-            'i': mesh_i, 'j': mesh_j, 'k': mesh_k,
-            'opacity': kwargs['alpha'], 'name': z_col
+        Z = grid_from_matrix(df_preview, first_row_as_x=mat_first_row, first_col_as_y=mat_first_col)
+
+# Aviso de carga
+r, c = Z.shape
+if r*c > 400:
+    st.info(f"Muitas barras ({r*c}). O navegador pode ficar pesado.")
+
+# ======================================
+# Construção das traces
+# ======================================
+x, y, z, i, j, k, intensity, centers = make_bars_mesh(
+    Z, sx=spacing_x, sy=spacing_y, bx=bar_size_x, by=bar_size_y, base_z=0.0
+)
+
+if reverse_colors:
+    colorscale_name = colorscale + "_r"
+else:
+    colorscale_name = colorscale
+
+data_traces = []
+if len(x):
+    mesh_kwargs = dict(
+        x=x, y=y, z=z,
+        i=i, j=j, k=k,
+        intensity=intensity,
+        colorscale=colorscale_name,
+        opacity=opacity,
+        flatshading=True,
+        showscale=show_colorbar,
+        lighting=dict(ambient=ambient, diffuse=diffuse, specular=specular),
+        lightposition=dict(x=100, y=200, z=0),
+        name="Barras 3D",
+        intensitymode="vertex",
+    )
+    if cmin_en and cmin_val is not None and cmax_val is not None:
+        mesh_kwargs["cmin"] = float(cmin_val)
+        mesh_kwargs["cmax"] = float(cmax_val)
+
+    mesh = go.Mesh3d(**mesh_kwargs)
+    data_traces.append(mesh)
+
+# Bordas
+if show_edges:
+    edge_trace = make_edges_traces(
+        Z, sx=spacing_x, sy=spacing_y, bx=bar_size_x, by=bar_size_y, base_z=0.0, line_width=edge_width, line_color=edge_color
+    )
+    if edge_trace is not None:
+        data_traces.append(edge_trace)
+
+# Labels de valor
+if show_value_labels and len(centers):
+    cx, cy, cz = centers[:,0], centers[:,1], centers[:,2]
+    texts = [f"{v:.{label_decimals}f}" for v in Z.flatten(order="C")]
+    label_trace = go.Scatter3d(
+        x=cx, y=cy, z=cz,
+        mode="text",
+        text=texts,
+        textposition="top center",
+        textfont=dict(size=label_font_size, color="black"),
+        name="Valores"
+    )
+    data_traces.append(label_trace)
+
+# ======================================
+# Layout da figura
+# ======================================
+xa = dict(title=dict(text=x_label, font=dict(size=label_size)),
+          tickfont=dict(size=tick_size),
+          showgrid=grid_on, gridcolor=grid_color,
+          showbackground=axis_bg_on, backgroundcolor=axis_bg_color)
+ya = dict(title=dict(text=y_label, font=dict(size=label_size)),
+          tickfont=dict(size=tick_size),
+          showgrid=grid_on, gridcolor=grid_color,
+          showbackground=axis_bg_on, backgroundcolor=axis_bg_color)
+za = dict(title=dict(text=z_label, font=dict(size=label_size)),
+          tickfont=dict(size=tick_size),
+          showgrid=grid_on, gridcolor=grid_color,
+          showbackground=axis_bg_on, backgroundcolor=axis_bg_color)
+
+if manual_range:
+    xa["range"] = [float(x_min), float(x_max)]
+    ya["range"] = [float(y_min), float(y_max)]
+    za["range"] = [float(z_min_fixed), float(z_max_fixed)]
+
+scene = dict(
+    xaxis=xa, yaxis=ya, zaxis=za,
+    aspectmode=aspect_mode,
+    camera=dict(eye=get_camera_eye(camera_view, (cam_x, cam_y, cam_z))),
+    bgcolor=scene_bg
+)
+
+if aspect_mode == "manual":
+    scene["aspectratio"] = dict(x=float(ar_x), y=float(ar_y), z=float(ar_z))
+
+fig = go.Figure(
+    data=data_traces,
+    layout=dict(
+        template=template,
+        scene=scene,
+        margin=dict(l=10, r=10, t=50, b=10),
+        title=dict(text=title_text, font=dict(size=title_size)),
+        paper_bgcolor="white"
+    )
+)
+
+# ======================================
+# UI principal
+# ======================================
+top_left, top_right = st.columns([3, 2])
+with top_left:
+    st.plotly_chart(fig, use_container_width=True, config={
+        "displaylogo": False,
+        "displayModeBar": True,
+        "toImageButtonOptions": {
+            "format": "png",
+            "filename": "grafico",
+            "scale": 2,
+            "width": 1600,
+            "height": 900
         }
-        
-        if kwargs['color_mode'] == "Única":
-            trace_params['color'] = kwargs['base_color']
-        elif kwargs['color_mode'] == "Por altura (colormap)":
-            trace_params['intensity'] = intensities
-            trace_params['colorscale'] = kwargs['colormap_name']
-            trace_params['colorbar'] = dict(title=z_col)
-        
-        fig.add_trace(go.Mesh3d(**trace_params))
-
-    # Adicionar contornos se necessário
-    if kwargs['show_outline']:
-        line_x, line_y, line_z = [], [], []
-        for _, row in df.iterrows():
-            lx, ly, lz = create_bar_outline_data(
-                row['_x_num'], row['_y_num'], row[z_col],
-                dx=bar_thickness, dy=bar_thickness
-            )
-            line_x.extend(lx)
-            line_y.extend(ly)
-            line_z.extend(lz)
-        
-        fig.add_trace(go.Scatter3d(
-            x=line_x, y=line_y, z=line_z,
-            mode='lines',
-            line=dict(color='black', width=kwargs['outline_width']),
-            showlegend=False
-        ))
-
-    # Adicionar barras de erro
-    if kwargs['err_style'] != "Nenhum":
-        err_df = df.copy()
-        
-        if kwargs['err_style'] == "Simétrico" and kwargs['err_col'] and kwargs['err_col'] in err_df.columns:
-            e = to_numeric_safe(err_df[kwargs['err_col']])
-            err_df['z_low'] = err_df[z_col] - e
-            err_df['z_high'] = err_df[z_col] + e
-        elif kwargs['err_style'] == "Assimétrico" and kwargs['err_low_col'] and kwargs['err_high_col']:
-            if kwargs['err_low_col'] in err_df.columns and kwargs['err_high_col'] in err_df.columns:
-                low = to_numeric_safe(err_df[kwargs['err_low_col']])
-                high = to_numeric_safe(err_df[kwargs['err_high_col']])
-                err_df['z_low'] = err_df[z_col] - low
-                err_df['z_high'] = err_df[z_col] + high
-        
-        err_df.dropna(subset=['z_low', 'z_high'], inplace=True)
-        err_x, err_y, err_z = [], [], []
-        for _, row in err_df.iterrows():
-            err_x.extend([row['_x_num'], row['_x_num'], None])
-            err_y.extend([row['_y_num'], row['_y_num'], None])
-            err_z.extend([row['z_low'], row['z_high'], None])
-        
-        fig.add_trace(go.Scatter3d(
-            x=err_x, y=err_y, z=err_z,
-            mode='lines',
-            line=dict(color='black', width=3),
-            showlegend=False
-        ))
-
-    # Adicionar valores no topo das barras
-    if kwargs['show_values']:
-        fig.add_trace(go.Scatter3d(
-            x=df['_x_num'], y=df['_y_num'],
-            z=df[z_col] + kwargs['value_offset'],
-            mode='text',
-            text=[kwargs['value_fmt'].format(val) for val in df[z_col]],
-            textfont=dict(size=kwargs['tick_size'], color='black'),
-            showlegend=False
-        ))
-    
-    # Configurar câmera e layout
-    camera = degrees_to_plotly_camera(kwargs['elev'], kwargs['azim'])
-    
-    fig.update_layout(
-        title=dict(text=kwargs['title'], font=dict(size=kwargs['title_size'])),
-        scene=dict(
-            xaxis=dict(
-                title=kwargs['xlabel'],
-                showgrid=kwargs['show_grid'],
-                backgroundcolor=kwargs['pane_color'],
-                tickvals=list(x_map.values()),
-                ticktext=list(x_map.keys())
-            ),
-            yaxis=dict(
-                title=kwargs['ylabel'],
-                showgrid=kwargs['show_grid'],
-                backgroundcolor=kwargs['pane_color'],
-                tickvals=list(y_map.values()),
-                ticktext=list(y_map.keys())
-            ),
-            zaxis=dict(
-                title=kwargs['zlabel'],
-                showgrid=kwargs['show_grid'],
-                backgroundcolor=kwargs['pane_color'],
-                range=[kwargs['zmin'], kwargs['zmax']]
-            ),
-            camera=dict(eye=camera),
-            aspectmode='manual' if kwargs.get('use_aspect', False) else 'auto',
-            aspectratio=dict(x=kwargs.get('aspect_x', 1), 
-                           y=kwargs.get('aspect_y', 1), 
-                           z=kwargs.get('aspect_z', 1)) if kwargs.get('use_aspect', False) else None
-        ),
-        font=dict(size=kwargs['label_size']),
-        plot_bgcolor=kwargs['bg_color'],
-        paper_bgcolor=kwargs['bg_color'],
-        showlegend=True if kwargs['color_mode'] == "Por série (Y)" else False,
-        margin=dict(l=0, r=0, t=50, b=0),
-        height=kwargs.get('chart_height', 800)
+    })
+with top_right:
+    st.markdown("### 📤 Exportação (sem Kaleido)")
+    plotly_download_button(
+        fig,
+        filename=f"grafico.{fmt.lower()}",
+        fmt=fmt.lower(),
+        width=int(export_w),
+        height=int(export_h),
+        scale=float(export_scale)
     )
-    
-    return fig
+    st.caption("Dica: Para **alta resolução**, use 4K/8K ou aumente a **escala**. Para nitidez perfeita em qualquer zoom, use **SVG**.")
 
-# -----------------------------
-# Função de Exportação Avançada
-# -----------------------------
-def export_high_quality_image(fig, format, width, height, scale):
-    """Exporta figura em alta qualidade com tratamento de erros."""
-    try:
-        if format.lower() == 'svg':
-            img_bytes = fig.to_image(format='svg', width=width, height=height)
-        else:
-            img_bytes = fig.to_image(
-                format=format.lower(),
-                width=width,
-                height=height,
-                scale=scale
-            )
-        return img_bytes, None
-    except Exception as e:
-        return None, str(e)
-
-# -----------------------------
-# Interface Principal
-# -----------------------------
-def main():
-    # Sidebar com controles
-    st.sidebar.title("⚙️ Controles 3D")
-    
-    params = {}
-    
-    # ===== SEÇÃO: DADOS =====
-    with st.sidebar.expander("📊 Dados", expanded=True):
-        up = st.file_uploader("CSV ou Excel", type=["csv", "xlsx", "xls"])
-        col1, col2 = st.columns(2)
-        with col1:
-            sep = st.text_input("Separador", value=",")
-        with col2:
-            use_editor = st.checkbox("Editar", value=False)
-    
-    # Carregar dados
-    df = None
-    if up:
-        try:
-            if up.name.lower().endswith(".csv"):
-                df = pd.read_csv(up, sep=sep)
-            else:
-                df = pd.read_excel(up)
-        except Exception as e:
-            st.error(f"Erro: {e}")
-    
-    df = ensure_min_columns(df)
-    cols = list(df.columns)
-    
-    # ===== SEÇÃO: MAPEAMENTO =====
-    with st.sidebar.expander("🔗 Colunas", expanded=True):
-        params['x_col'] = st.selectbox("X", cols, 0)
-        params['y_col'] = st.selectbox("Y", cols, min(1, len(cols)-1))
-        params['z_col'] = st.selectbox("Z", cols, min(2, len(cols)-1))
-        
-        params['err_style'] = st.radio("Erro", ["Nenhum", "Simétrico", "Assimétrico"])
-        params['err_col'] = params['err_low_col'] = params['err_high_col'] = None
-        
-        if params['err_style'] == "Simétrico":
-            params['err_col'] = st.selectbox("Erro ±", ["—"] + cols)
-            if params['err_col'] == "—":
-                params['err_style'] = "Nenhum"
-        elif params['err_style'] == "Assimétrico":
-            params['err_low_col'] = st.selectbox("Erro -", ["—"] + cols)
-            params['err_high_col'] = st.selectbox("Erro +", ["—"] + cols)
-            if "—" in [params['err_low_col'], params['err_high_col']]:
-                params['err_style'] = "Nenhum"
-    
-    # ===== SEÇÃO: APARÊNCIA =====
-    with st.sidebar.expander("🎨 Cores"):
-        params['alpha'] = st.slider("Opacidade", 0.1, 1.0, 1.0, 0.05)
-        params['color_mode'] = st.selectbox("Modo", ["Única", "Por série (Y)", "Por altura (colormap)"])
-        
-        params['base_color'] = "#3182bd"
-        params['colormap_name'] = "Viridis"
-        params['series_palette_name'] = "Plotly"
-        
-        if params['color_mode'] == "Única":
-            params['base_color'] = st.color_picker("Cor", "#3182bd")
-        elif params['color_mode'] == "Por altura (colormap)":
-            params['colormap_name'] = st.selectbox("Mapa", ["Viridis", "Plasma", "Blues", "Reds"])
-        else:
-            params['series_palette_name'] = st.selectbox("Paleta", ["Plotly", "T10", "G10", "D3"])
-    
-    # ===== SEÇÃO: BARRAS =====
-    with st.sidebar.expander("📊 Barras"):
-        params['bar_thickness'] = st.slider("Espessura", 0.1, 1.0, 0.8, 0.05)
-        params['show_outline'] = st.checkbox("Contorno")
-        params['outline_width'] = 2
-        if params['show_outline']:
-            params['outline_width'] = st.slider("Largura", 1, 10, 2)
-        
-        params['show_values'] = st.checkbox("Valores", True)
-        if params['show_values']:
-            params['value_fmt'] = st.text_input("Formato", "{:.2f}")
-            params['value_offset'] = st.number_input("Offset", 2.0, step=0.5)
-    
-    # ===== SEÇÃO: CÂMERA =====
-    with st.sidebar.expander("📐 Câmera"):
-        col1, col2 = st.columns(2)
-        with col1:
-            params['elev'] = st.slider("Elev", -90, 90, 20)
-        with col2:
-            params['azim'] = st.slider("Azim", -180, 180, -45)
-        
-        params['use_aspect'] = st.checkbox("Proporção manual")
-        if params['use_aspect']:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                params['aspect_x'] = st.number_input("X", 1.0, 0.1, step=0.1)
-            with c2:
-                params['aspect_y'] = st.number_input("Y", 1.0, 0.1, step=0.1)
-            with c3:
-                params['aspect_z'] = st.number_input("Z", 1.0, 0.1, step=0.1)
-        
-        use_zmin = st.checkbox("Fixar Z mín")
-        params['zmin'] = st.number_input("Z mín", 0.0, disabled=not use_zmin) if use_zmin else None
-        use_zmax = st.checkbox("Fixar Z máx")
-        params['zmax'] = st.number_input("Z máx", 100.0, disabled=not use_zmax) if use_zmax else None
-    
-    # ===== SEÇÃO: RÓTULOS =====
-    with st.sidebar.expander("📝 Texto"):
-        params['title'] = st.text_input("Título", "Gráfico 3D")
-        params['xlabel'] = st.text_input("Eixo X", "X")
-        params['ylabel'] = st.text_input("Eixo Y", "Y")
-        params['zlabel'] = st.text_input("Eixo Z", "Z")
-        
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            # FIX: Corrigido usando argumentos nomeados para garantir a ordem correta.
-            params['title_size'] = st.number_input("Tít", min_value=8, max_value=40, value=16)
-        with c2:
-            # FIX: Corrigido usando argumentos nomeados para garantir a ordem correta.
-            params['label_size'] = st.number_input("Eix", min_value=6, max_value=30, value=12)
-        with c3:
-            # FIX: Corrigido usando argumentos nomeados para garantir a ordem correta.
-            params['tick_size'] = st.number_input("Val", min_value=6, max_value=30, value=10)
-    
-    # ===== SEÇÃO: LAYOUT =====
-    with st.sidebar.expander("🎯 Visual"):
-        params['show_grid'] = st.checkbox("Grade", True)
-        params['bg_color'] = st.color_picker("Fundo", "#ffffff")
-        params['pane_color'] = st.color_picker("Plano", "#f0f0f0")
-        chart_height = st.slider("Altura (px)", 400, 1500, 800, 50)
-        params['chart_height'] = chart_height
-    
-    # ===== SEÇÃO: EXPORTAÇÃO =====
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("💾 Export HD")
-    
-    # Formato
-    export_format = st.sidebar.selectbox("Formato", ["PNG", "JPEG", "SVG"])
-    
-    # Resolução
-    resolution_preset = st.sidebar.selectbox(
-        "Resolução",
-        list(RESOLUTION_PRESETS.keys()),
-        index=1
-    )
-    
-    if resolution_preset == "Custom":
-        c1, c2 = st.sidebar.columns(2)
-        with c1:
-            export_width = st.number_input("L (px)", min_value=100, max_value=10000, value=1920)
-        with c2:
-            export_height = st.number_input("A (px)", min_value=100, max_value=10000, value=1080)
+# Prévia dos dados
+with st.expander("👀 Pré-visualização dos dados"):
+    if data_source == "Arquivo" and df_preview is not None:
+        st.dataframe(df_preview.head(100), use_container_width=True)
     else:
-        export_width, export_height = RESOLUTION_PRESETS[resolution_preset]
-        st.sidebar.info(f"📐 {export_width}x{export_height}px")
-    
-    # Qualidade
-    dpi_preset = st.sidebar.selectbox("Qualidade", list(DPI_PRESETS.keys()), 3)
-    export_scale = DPI_PRESETS[dpi_preset]
-    
-    # ===== ÁREA PRINCIPAL =====
-    # Container principal com altura customizada
-    main_container = st.container()
-    
-    with main_container:
-        # Título
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.title("📊 Visualização 3D Interativa")
-        with col2:
-            if st.button("🔄 Reset"):
-                st.rerun()
-        
-        # Tabs
-        tab1, tab2 = st.tabs(["📈 Gráfico", "📊 Dados"])
-        
-        with tab2:
-            if use_editor:
-                st.write("### Editor de Dados")
-                df = st.data_editor(df, num_rows="dynamic", use_container_width=True, height=400)
-            else:
-                st.write("### Dados Carregados")
-                st.dataframe(df, use_container_width=True, height=400)
-            
-            # Estatísticas
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                st.metric("Linhas", len(df))
-            with c2:
-                st.metric("Colunas", len(df.columns))
-            with c3:
-                if params['z_col'] in df.columns:
-                    z_vals = to_numeric_safe(df[params['z_col']]).dropna()
-                    if len(z_vals) > 0:
-                        st.metric("Z Médio", f"{z_vals.mean():.2f}")
-            with c4:
-                if params['z_col'] in df.columns:
-                    z_vals = to_numeric_safe(df[params['z_col']]).dropna()
-                    if len(z_vals) > 0:
-                        st.metric("Z Máx", f"{z_vals.max():.2f}")
-        
-        with tab1:
-            # Renderizar gráfico
-            fig = render_plotly_3d_bars(df=df, **params)
-            
-            # Mostrar gráfico com altura customizada
-            st.plotly_chart(
-                fig, 
-                use_container_width=True,
-                config={
-                    'displaylogo': False,
-                    'toImageButtonOptions': {
-                        'format': export_format.lower(),
-                        'filename': 'grafico_3d',
-                        'height': export_height,
-                        'width': export_width,
-                        'scale': export_scale
-                    }
-                }
-            )
-            
-            # Área de download
-            st.markdown("---")
-            col1, col2, col3 = st.columns([2, 2, 1])
-            
-            with col1:
-                st.write("### 💾 Download HD")
-                st.write(f"**Formato:** {export_format}")
-                st.write(f"**Resolução:** {export_width}x{export_height}px")
-                st.write(f"**DPI Efetivo:** ~{int(72 * export_scale)}")
-            
-            with col2:
-                st.write("### ⚡ Exportar")
-                if st.button("🎯 Gerar Imagem HD", type="primary"):
-                    with st.spinner("Gerando imagem em alta resolução..."):
-                        img_bytes, error = export_high_quality_image(
-                            fig, export_format, export_width, export_height, export_scale
-                        )
-                        
-                        if img_bytes:
-                            st.success("✅ Imagem gerada com sucesso!")
-                            st.download_button(
-                                label=f"⬇️ Baixar {export_format} ({export_width}x{export_height})",
-                                data=img_bytes,
-                                file_name=f"grafico_3d_{export_width}x{export_height}.{export_format.lower()}",
-                                mime=f"image/{export_format.lower()}",
-                                type="primary"
-                            )
-                        else:
-                            st.error(f"❌ Erro: {error}")
-                            st.info("💡 Instale 'kaleido' no requirements.txt")
-            
-            with col3:
-                st.write("### 📋 Info")
-                if export_format in ["PNG", "JPEG"]:
-                    size_mb = (export_width * export_height * export_scale * 4) / (1024 * 1024)
-                    st.write(f"**Tamanho:** ~{size_mb:.1f}MB")
-                else:
-                    st.write("**Tipo:** Vetorial")
-
-if __name__ == "__main__":
-    main()
+        st.write("Dados aleatórios gerados com os parâmetros acima.")
 
 
 
