@@ -9,7 +9,6 @@ Melhorias principais:
 - Exportação em alta resolução com múltiplas opções
 - Controles avançados de qualidade de exportação
 - Suporte para diferentes aspectos e resoluções predefinidas
-- Preview da exportação antes do download
 """
 
 import io
@@ -20,7 +19,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-from PIL import Image
 
 # -----------------------------
 # Configuração da Página
@@ -126,11 +124,9 @@ RESOLUTION_PRESETS = {
     "Full HD (1920x1080)": (1920, 1080),
     "2K (2560x1440)": (2560, 1440),
     "4K (3840x2160)": (3840, 2160),
-    "8K (7680x4320)": (7680, 4320),
     "Square (2000x2000)": (2000, 2000),
     "Portrait (1080x1920)": (1080, 1920),
     "Wide (2560x1080)": (2560, 1080),
-    "Presentation (1920x1200)": (1920, 1200),
     "Custom": None
 }
 
@@ -140,7 +136,6 @@ DPI_PRESETS = {
     "Print Low (150 DPI)": 2.08,
     "Print Medium (300 DPI)": 4.17,
     "Print High (600 DPI)": 8.33,
-    "Print Ultra (1200 DPI)": 16.67
 }
 
 # -----------------------------
@@ -337,10 +332,8 @@ def export_high_quality_image(fig, format, width, height, scale):
     """Exporta figura em alta qualidade com tratamento de erros."""
     try:
         if format.lower() == 'svg':
-            # SVG não usa scale
             img_bytes = fig.to_image(format='svg', width=width, height=height)
         else:
-            # PNG e JPEG usam scale para aumentar a qualidade
             img_bytes = fig.to_image(
                 format=format.lower(),
                 width=width,
@@ -355,12 +348,8 @@ def export_high_quality_image(fig, format, width, height, scale):
 # Interface Principal
 # -----------------------------
 def main():
-    # Inicializar estados de sessão
-    if 'export_preview' not in st.session_state:
-        st.session_state.export_preview = None
-    
     # Sidebar com controles
-    st.sidebar.title("⚙️ Controles do Gráfico 3D")
+    st.sidebar.title("⚙️ Controles 3D")
     
     params = {}
     
@@ -371,7 +360,7 @@ def main():
         with col1:
             sep = st.text_input("Separador", value=",")
         with col2:
-            use_editor = st.checkbox("Editar dados", value=False)
+            use_editor = st.checkbox("Editar", value=False)
     
     # Carregar dados
     df = None
@@ -382,207 +371,235 @@ def main():
             else:
                 df = pd.read_excel(up)
         except Exception as e:
-            st.error(f"Erro ao ler arquivo: {e}")
+            st.error(f"Erro: {e}")
     
     df = ensure_min_columns(df)
     cols = list(df.columns)
     
     # ===== SEÇÃO: MAPEAMENTO =====
-    with st.sidebar.expander("🔗 Mapeamento de Colunas", expanded=True):
-        params['x_col'] = st.selectbox("Coluna X", options=cols, index=0)
-        params['y_col'] = st.selectbox("Coluna Y", options=cols, index=1 if len(cols) > 1 else 0)
-        params['z_col'] = st.selectbox("Coluna Z (altura)", options=cols, index=2 if len(cols) > 2 else 0)
+    with st.sidebar.expander("🔗 Colunas", expanded=True):
+        params['x_col'] = st.selectbox("X", cols, 0)
+        params['y_col'] = st.selectbox("Y", cols, min(1, len(cols)-1))
+        params['z_col'] = st.selectbox("Z", cols, min(2, len(cols)-1))
         
-        st.markdown("---")
-        params['err_style'] = st.radio("Tipo de erro", ["Nenhum", "Simétrico", "Assimétrico"], horizontal=True)
-        params['err_col'], params['err_low_col'], params['err_high_col'] = None, None, None
+        params['err_style'] = st.radio("Erro", ["Nenhum", "Simétrico", "Assimétrico"])
+        params['err_col'] = params['err_low_col'] = params['err_high_col'] = None
         
         if params['err_style'] == "Simétrico":
-            params['err_col'] = st.selectbox("Coluna de erro (±)", ["—"] + cols)
+            params['err_col'] = st.selectbox("Erro ±", ["—"] + cols)
             if params['err_col'] == "—":
                 params['err_style'] = "Nenhum"
         elif params['err_style'] == "Assimétrico":
-            params['err_low_col'] = st.selectbox("Coluna de erro -", ["—"] + cols)
-            params['err_high_col'] = st.selectbox("Coluna de erro +", ["—"] + cols)
-            if params['err_low_col'] == "—" or params['err_high_col'] == "—":
+            params['err_low_col'] = st.selectbox("Erro -", ["—"] + cols)
+            params['err_high_col'] = st.selectbox("Erro +", ["—"] + cols)
+            if "—" in [params['err_low_col'], params['err_high_col']]:
                 params['err_style'] = "Nenhum"
     
     # ===== SEÇÃO: APARÊNCIA =====
-    with st.sidebar.expander("🎨 Cores e Aparência"):
-        params['alpha'] = st.slider("Transparência", 0.1, 1.0, 1.0, 0.05)
-        params['color_mode'] = st.selectbox(
-            "Modo de cor",
-            ["Única", "Por série (Y)", "Por altura (colormap)"]
-        )
+    with st.sidebar.expander("🎨 Cores"):
+        params['alpha'] = st.slider("Opacidade", 0.1, 1.0, 1.0, 0.05)
+        params['color_mode'] = st.selectbox("Modo", ["Única", "Por série (Y)", "Por altura (colormap)"])
         
         params['base_color'] = "#3182bd"
         params['colormap_name'] = "Viridis"
         params['series_palette_name'] = "Plotly"
         
         if params['color_mode'] == "Única":
-            params['base_color'] = st.color_picker("Cor base", value="#3182bd")
+            params['base_color'] = st.color_picker("Cor", "#3182bd")
         elif params['color_mode'] == "Por altura (colormap)":
-            params['colormap_name'] = st.selectbox(
-                "Colormap",
-                ["Viridis", "Cividis", "Plasma", "Blues", "Reds", "Greens", "Turbo", "Rainbow"]
-            )
-        elif params['color_mode'] == "Por série (Y)":
-            params['series_palette_name'] = st.selectbox(
-                "Paleta",
-                ["Plotly", "T10", "G10", "D3", "Pastel", "Set1", "Set2", "Set3"]
-            )
+            params['colormap_name'] = st.selectbox("Mapa", ["Viridis", "Plasma", "Blues", "Reds"])
+        else:
+            params['series_palette_name'] = st.selectbox("Paleta", ["Plotly", "T10", "G10", "D3"])
     
     # ===== SEÇÃO: BARRAS =====
-    with st.sidebar.expander("📊 Formato das Barras"):
+    with st.sidebar.expander("📊 Barras"):
         params['bar_thickness'] = st.slider("Espessura", 0.1, 1.0, 0.8, 0.05)
-        params['show_outline'] = st.checkbox("Contorno", value=False)
+        params['show_outline'] = st.checkbox("Contorno")
         params['outline_width'] = 2
         if params['show_outline']:
-            params['outline_width'] = st.slider("Largura contorno", 1, 10, 2)
+            params['outline_width'] = st.slider("Largura", 1, 10, 2)
         
-        st.markdown("---")
-        params['show_values'] = st.checkbox("Mostrar valores", value=True)
+        params['show_values'] = st.checkbox("Valores", True)
         if params['show_values']:
-            params['value_fmt'] = st.text_input("Formato", value="{:.2f}")
-            params['value_offset'] = st.number_input("Offset Z", value=2.0, step=0.5)
+            params['value_fmt'] = st.text_input("Formato", "{:.2f}")
+            params['value_offset'] = st.number_input("Offset", 2.0, step=0.5)
     
-    # ===== SEÇÃO: CÂMERA E EIXOS =====
-    with st.sidebar.expander("📐 Câmera e Eixos"):
+    # ===== SEÇÃO: CÂMERA =====
+    with st.sidebar.expander("📐 Câmera"):
         col1, col2 = st.columns(2)
         with col1:
-            params['elev'] = st.slider("Elevação", -90, 90, 20)
+            params['elev'] = st.slider("Elev", -90, 90, 20)
         with col2:
-            params['azim'] = st.slider("Azimute", -180, 180, -45)
+            params['azim'] = st.slider("Azim", -180, 180, -45)
         
-        st.markdown("---")
-        params['use_aspect'] = st.checkbox("Proporção manual", value=False)
+        params['use_aspect'] = st.checkbox("Proporção manual")
         if params['use_aspect']:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                params['aspect_x'] = st.number_input("X", value=1.0, min_value=0.1, step=0.1)
-            with col2:
-                params['aspect_y'] = st.number_input("Y", value=1.0, min_value=0.1, step=0.1)
-            with col3:
-                params['aspect_z'] = st.number_input("Z", value=1.0, min_value=0.1, step=0.1)
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                params['aspect_x'] = st.number_input("X", 1.0, 0.1, step=0.1)
+            with c2:
+                params['aspect_y'] = st.number_input("Y", 1.0, 0.1, step=0.1)
+            with c3:
+                params['aspect_z'] = st.number_input("Z", 1.0, 0.1, step=0.1)
         
-        st.markdown("---")
         use_zmin = st.checkbox("Fixar Z mín")
-        params['zmin'] = st.number_input("Z mínimo", value=0.0, disabled=not use_zmin) if use_zmin else None
+        params['zmin'] = st.number_input("Z mín", 0.0, disabled=not use_zmin) if use_zmin else None
         use_zmax = st.checkbox("Fixar Z máx")
-        params['zmax'] = st.number_input("Z máximo", value=100.0, disabled=not use_zmax) if use_zmax else None
+        params['zmax'] = st.number_input("Z máx", 100.0, disabled=not use_zmax) if use_zmax else None
     
     # ===== SEÇÃO: RÓTULOS =====
-    with st.sidebar.expander("📝 Rótulos e Texto"):
-        params['title'] = st.text_input("Título", value="Gráfico de Barras 3D")
-        params['xlabel'] = st.text_input("Rótulo X", "X")
-        params['ylabel'] = st.text_input("Rótulo Y", "Y")
-        params['zlabel'] = st.text_input("Rótulo Z", "Z")
+    with st.sidebar.expander("📝 Texto"):
+        params['title'] = st.text_input("Título", "Gráfico 3D")
+        params['xlabel'] = st.text_input("Eixo X", "X")
+        params['ylabel'] = st.text_input("Eixo Y", "Y")
+        params['zlabel'] = st.text_input("Eixo Z", "Z")
         
-        st.markdown("---")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            params['title_size'] = st.number_input("Título", value=16, min_value=8, max_value=40)
-        with col2:
-            params['label_size'] = st.number_input("Rótulos", value=12, min_value=6, max_value=30)
-        with col3:
-            params['tick_size'] = st.number_input("Valores", value=10, min_value=6, max_value=30)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            params['title_size'] = st.number_input("Tít", 16, 8, 40)
+        with c2:
+            params['label_size'] = st.number_input("Eix", 12, 6, 30)
+        with c3:
+            params['tick_size'] = st.number_input("Val", 10, 6, 30)
     
     # ===== SEÇÃO: LAYOUT =====
-    with st.sidebar.expander("🎯 Layout e Visual"):
-        params['show_grid'] = st.checkbox("Mostrar grade", value=True)
-        params['bg_color'] = st.color_picker("Cor de fundo", "#ffffff")
-        params['pane_color'] = st.color_picker("Cor do plano", "#f0f0f0")
-        
-        st.markdown("---")
-        chart_height = st.slider(
-            "Altura do gráfico (pixels)",
-            min_value=400,
-            max_value=1500,
-            value=800,
-            step=50
-        )
+    with st.sidebar.expander("🎯 Visual"):
+        params['show_grid'] = st.checkbox("Grade", True)
+        params['bg_color'] = st.color_picker("Fundo", "#ffffff")
+        params['pane_color'] = st.color_picker("Plano", "#f0f0f0")
+        chart_height = st.slider("Altura (px)", 400, 1500, 800, 50)
         params['chart_height'] = chart_height
     
-    # ===== SEÇÃO: EXPORTAÇÃO AVANÇADA =====
+    # ===== SEÇÃO: EXPORTAÇÃO =====
     st.sidebar.markdown("---")
-    st.sidebar.subheader("💾 Exportação HD")
+    st.sidebar.subheader("💾 Export HD")
     
-    with st.sidebar.expander("Configurações de Exportação", expanded=True):
-        # Formato
-        export_format = st.selectbox(
-            "Formato",
-            ["PNG", "JPEG", "SVG", "PDF", "WebP"],
-            help="SVG é vetorial (escalável). PNG suporta transparência."
-        )
-        
-        # Preset de resolução
-        resolution_preset = st.selectbox(
-            "Resolução",
-            list(RESOLUTION_PRESETS.keys()),
-            index=1  # Full HD por padrão
-        )
-        
-        if resolution_preset == "Custom":
-            col1, col2 = st.columns(2)
-            with col1:
-                export_width = st.number_input("Largura (px)", value=1920, min_value=100, max_value=10000)
-            with col2:
-                export_height = st.number_input("Altura (px)", value=1080, min_value=100, max_value=10000)
-        else:
-            export_width, export_height = RESOLUTION_PRESETS[resolution_preset]
-            st.info(f"📐 Resolução: {export_width} x {export_height} pixels")
-        
-        # Qualidade (DPI)
-        dpi_preset = st.selectbox(
-            "Qualidade (DPI)",
-            list(DPI_PRESETS.keys()),
-            index=3,  # Print Medium por padrão
-            help="DPI mais alto = arquivo maior, qualidade superior"
-        )
-        export_scale = DPI_PRESETS[dpi_preset]
-        
-        # Informações sobre o arquivo final
-        estimated_dpi = int(72 * export_scale)
-        if export_format in ["PNG", "JPEG"]:
-            estimated_size_mb = (export_width * export_height * export_scale * 4) / (1024 * 1024)
-            st.info(f"📊 DPI efetivo: ~{estimated_dpi} | Tamanho estimado: ~{estimated_size_mb:.1f} MB")
-        
-        # Opções adicionais
-        if export_format == "JPEG":
-            jpeg_quality = st.slider("Qualidade JPEG", 50, 100, 95, help="100 = máxima qualidade")
-        else:
-            jpeg_quality = 95
+    # Formato
+    export_format = st.sidebar.selectbox("Formato", ["PNG", "JPEG", "SVG"])
+    
+    # Resolução
+    resolution_preset = st.sidebar.selectbox(
+        "Resolução",
+        list(RESOLUTION_PRESETS.keys()),
+        index=1
+    )
+    
+    if resolution_preset == "Custom":
+        c1, c2 = st.sidebar.columns(2)
+        with c1:
+            export_width = st.number_input("L (px)", 1920, 100, 10000)
+        with c2:
+            export_height = st.number_input("A (px)", 1080, 100, 10000)
+    else:
+        export_width, export_height = RESOLUTION_PRESETS[resolution_preset]
+        st.sidebar.info(f"📐 {export_width}x{export_height}px")
+    
+    # Qualidade
+    dpi_preset = st.sidebar.selectbox("Qualidade", list(DPI_PRESETS.keys()), 3)
+    export_scale = DPI_PRESETS[dpi_preset]
     
     # ===== ÁREA PRINCIPAL =====
-    # Título e descrição
-    col1, col2, col3 = st.columns([2, 3, 1])
-    with col1:
-        st.title("📊 Barras 3D Interativo")
-    with col3:
-        if st.button("🔄 Resetar Visualização"):
-            st.rerun()
+    # Container principal com altura customizada
+    main_container = st.container()
     
-    # Tabs para organização
-    tab1, tab2, tab3 = st.tabs(["📈 Visualização", "📊 Dados", "💾 Exportação"])
-    
-    with tab2:
-        if use_editor:
-            st.write("### Editor de Dados")
-            df = st.data_editor(df, num_rows="dynamic", use_container_width=True, height=400)
-        else:
-            st.write("### Prévia dos Dados")
-            st.dataframe(df, use_container_width=True, height=400)
-        
-        # Estatísticas básicas
-        col1, col2, col3, col4 = st.columns(4)
+    with main_container:
+        # Título
+        col1, col2 = st.columns([4, 1])
         with col1:
-            st.metric("Linhas", len(df))
+            st.title("📊 Visualização 3D Interativa")
         with col2:
-            st.metric("Colunas", len(df.columns))
-        with col3:
-            if params['z_col'] in df.columns:
-                st.metric("
+            if st.button("🔄 Reset"):
+                st.rerun()
+        
+        # Tabs
+        tab1, tab2 = st.tabs(["📈 Gráfico", "📊 Dados"])
+        
+        with tab2:
+            if use_editor:
+                st.write("### Editor de Dados")
+                df = st.data_editor(df, num_rows="dynamic", use_container_width=True, height=400)
+            else:
+                st.write("### Dados Carregados")
+                st.dataframe(df, use_container_width=True, height=400)
+            
+            # Estatísticas
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Linhas", len(df))
+            with c2:
+                st.metric("Colunas", len(df.columns))
+            with c3:
+                if params['z_col'] in df.columns:
+                    z_vals = to_numeric_safe(df[params['z_col']]).dropna()
+                    if len(z_vals) > 0:
+                        st.metric("Z Médio", f"{z_vals.mean():.2f}")
+            with c4:
+                if params['z_col'] in df.columns:
+                    z_vals = to_numeric_safe(df[params['z_col']]).dropna()
+                    if len(z_vals) > 0:
+                        st.metric("Z Máx", f"{z_vals.max():.2f}")
+        
+        with tab1:
+            # Renderizar gráfico
+            fig = render_plotly_3d_bars(df=df, **params)
+            
+            # Mostrar gráfico com altura customizada
+            st.plotly_chart(
+                fig, 
+                use_container_width=True,
+                config={
+                    'displaylogo': False,
+                    'toImageButtonOptions': {
+                        'format': export_format.lower(),
+                        'filename': 'grafico_3d',
+                        'height': export_height,
+                        'width': export_width,
+                        'scale': export_scale
+                    }
+                }
+            )
+            
+            # Área de download
+            st.markdown("---")
+            col1, col2, col3 = st.columns([2, 2, 1])
+            
+            with col1:
+                st.write("### 💾 Download HD")
+                st.write(f"**Formato:** {export_format}")
+                st.write(f"**Resolução:** {export_width}x{export_height}px")
+                st.write(f"**DPI Efetivo:** ~{int(72 * export_scale)}")
+            
+            with col2:
+                st.write("### ⚡ Exportar")
+                if st.button("🎯 Gerar Imagem HD", type="primary"):
+                    with st.spinner("Gerando imagem em alta resolução..."):
+                        img_bytes, error = export_high_quality_image(
+                            fig, export_format, export_width, export_height, export_scale
+                        )
+                        
+                        if img_bytes:
+                            st.success("✅ Imagem gerada com sucesso!")
+                            st.download_button(
+                                label=f"⬇️ Baixar {export_format} ({export_width}x{export_height})",
+                                data=img_bytes,
+                                file_name=f"grafico_3d_{export_width}x{export_height}.{export_format.lower()}",
+                                mime=f"image/{export_format.lower()}",
+                                type="primary"
+                            )
+                        else:
+                            st.error(f"❌ Erro: {error}")
+                            st.info("💡 Instale 'kaleido' no requirements.txt")
+            
+            with col3:
+                st.write("### 📋 Info")
+                if export_format in ["PNG", "JPEG"]:
+                    size_mb = (export_width * export_height * export_scale * 4) / (1024 * 1024)
+                    st.write(f"**Tamanho:** ~{size_mb:.1f}MB")
+                else:
+                    st.write("**Tipo:** Vetorial")
 
+if __name__ == "__main__":
+    main()
 
 
 
